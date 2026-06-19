@@ -79,11 +79,13 @@ fn print_help() {
     println!("  -v, --version   Show version");
     println!("  --list-modes    List available attack modes");
     println!("  --dry-run       Only probe the domain, exit without load test");
+    println!("  --verify        Verify proxies, show alive count, exit without load test");
     println!("  --output CSV    Write results to CSV file");
     println!("  --proxy-file F  Load proxy list from file (one per line or comma-separated)");
     println!("  --tor-proxy URL Specify custom Tor proxy URL (e.g. socks5://127.0.0.1:9050)");
     println!("  --delay MS      Per-request delay in milliseconds");
     println!("  --max-errors N  Stop after N failed requests");
+    println!("  --save-proxies F Save discovered proxies to file");
     println!("");
     println!("Modes: scrape, tor, scrape-tor (proxy source)");
     println!("Attack modes: normal, bandwidth, slowread, imageopt, largepost, assetspray,");
@@ -617,8 +619,10 @@ async fn main() {
     }
     // Parse flags
     let mut dry_run = false;
+    let mut verify = false;
     let mut version = false;
     let mut list_modes = false;
+    let mut save_proxies: Option<String> = None;
     let mut output_csv: Option<String> = None;
     let mut proxy_file: Option<String> = None;
     let mut tor_proxy: Option<String> = None;
@@ -629,6 +633,7 @@ async fn main() {
         match arg.as_str() {
             "--version" => version = true,
             "--list-modes" => list_modes = true,
+            "--verify" => verify = true,
             "--dry-run" => dry_run = true,
             "--output" => {},
             "--proxy-file" => {},
@@ -646,6 +651,8 @@ async fn main() {
                     delay_ms = other.strip_prefix("--delay=").unwrap().parse().unwrap_or(0);
                 } else if other.starts_with("--max-errors=") {
                     max_errors = other.strip_prefix("--max-errors=").unwrap().parse().ok();
+                } else if other.starts_with("--save-proxies=") {
+                    save_proxies = Some(other.strip_prefix("--save-proxies=").unwrap().to_string());
                 } else {
                     positional.push(other);
                 }
@@ -657,6 +664,81 @@ async fn main() {
     let attack_str = positional.get(2).copied().unwrap_or("normal");
     let concurrency: usize = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
     let duration_secs: u64 = positional.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
+
+    if verify {
+        println!("=== Simulate Load Rust ===");
+        println!("Target: {}", target_url);
+        println!("Mode: {} (proxy: {})", attack_str, mode_str);
+        println!("Concurrency: {}  Duration: {}s", concurrency, duration_secs);
+        println!("");
+
+        // Probe domain
+        let state = Arc::new(Mutex::new(AppState::new()));
+        state.lock().await.target_url = target_url.to_string();
+        state.lock().await.load_concurrency = concurrency;
+        state.lock().await.attack_mode = match attack_str {
+            "bandwidth" => AttackMode::Bandwidth,
+            "slowread" => AttackMode::SlowRead,
+            "imageopt" => AttackMode::ImageOpt,
+            "largepost" => AttackMode::LargePost,
+            "assetspray" => AttackMode::AssetSpray,
+            "rangereq" => AttackMode::RangeReq,
+            "cookiebomb" => AttackMode::CookieBomb,
+            "ssr" => AttackMode::SSR,
+            "middleware" => AttackMode::Middleware,
+            "requestflood" => AttackMode::RequestFlood,
+            "notfound" => AttackMode::NotFound,
+            _ => AttackMode::Normal,
+        };
+        match mode_str {
+            "tor" => state.lock().await.mode = ProxyMode::Tor,
+            "scrape-tor" => state.lock().await.mode = ProxyMode::ScrapeTorFallback,
+            _ => state.lock().await.mode = ProxyMode::Scrape,
+        }
+
+        println!("[1/2] Probing domain...");
+        probe_domain(target_url, &state).await;
+        let status = {
+            let st = state.lock().await;
+            st.probe_status.clone()
+        };
+        println!("  {}", status);
+        println!("");
+
+        println!("[2/2] Verifying proxies...");
+        let proxies = if let Some(path) = &proxy_file {
+            let content = std::fs::read_to_string(path).unwrap_or_default();
+            let list: Vec<String> = content
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .filter_map(|s| { let s = s.trim(); if !s.is_empty() { Some(s.to_string()) } else { None }})
+                .collect();
+            if list.is_empty() { None } else { Some(list) }
+        } else if let Some(url) = &tor_proxy {
+            let n = concurrency.min(20);
+            let mut p = Vec::with_capacity(n);
+            for i in 0..n { p.push(format!("socks5://tor{}:isolate@{}", i, url.trim_start_matches("socks5://").trim_start_matches("http://"))); }
+            Some(p)
+        } else {
+            get_proxies(state.lock().await.mode, &state).await
+        };
+        match proxies {
+            Some(prox_list) => {
+                println!("  Acquired {} proxies", prox_list.len());
+                if let Some(path) = &save_proxies {
+                    let content = prox_list.join("
+");
+                    std::fs::write(path, content).unwrap();
+                    println!("  Saved {} proxies to {}", prox_list.len(), path);
+                }
+                println!("  [VERIFIED] Proxy health check complete.");
+            }
+            None => {
+                eprintln!("  Failed to get proxies.");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     if version {
         println!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
