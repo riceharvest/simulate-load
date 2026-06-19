@@ -1,0 +1,14 @@
+/home/dario/.gemini/antigravity-cli/scratch/simulate_load_rust/target/release/deps/serde-2155e99f890e2a0c.d: /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/dario/.gemini/antigravity-cli/scratch/simulate_load_rust/target/release/build/serde-34f48f7d935fc3cc/out/private.rs
+
+/home/dario/.gemini/antigravity-cli/scratch/simulate_load_rust/target/release/deps/libserde-2155e99f890e2a0c.rlib: /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/dario/.gemini/antigravity-cli/scratch/simulate_load_rust/target/release/build/serde-34f48f7d935fc3cc/out/private.rs
+
+/home/dario/.gemini/antigravity-cli/scratch/simulate_load_rust/target/release/deps/libserde-2155e99f890e2a0c.rmeta: /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/dario/.gemini/antigravity-cli/scratch/simulate_load_rust/target/release/build/serde-34f48f7d935fc3cc/out/private.rs
+
+/home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/home/dario/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/home/dario/.gemini/antigravity-cli/scratch/simulate_load_rust/target/release/build/serde-34f48f7d935fc3cc/out/private.rs:
+
+# env-dep:OUT_DIR=/home/dario/.gemini/antigravity-cli/scratch/simulate_load_rust/target/release/build/serde-34f48f7d935fc3cc/out
