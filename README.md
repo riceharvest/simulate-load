@@ -1,57 +1,88 @@
-# Simulate Load Rust
+# simulate_load_rust
 
-Single-system load testing tool for web applications. Uses proxy pools with randomized user-agents to simulate real user traffic patterns.
+Single-system HTTP load testing tool with proxy rotation and browser spoofing.
 
 ## Features
 
-- **Domain probing** — auto-detects Vercel/Cloudflare, scans assets, APIs, middleware, ISR, image optimization
-- **12 attack modes** — Normal, Bandwidth, SlowRead, ImageOpt, LargePost, AssetSpray, RangeReq, CookieBomb, SSR, Middleware, RequestFlood, 404Storm
-- **Proxy management** — scrapes public proxies, validates via TCP, falls back to Tor
-- **Session handling** — cookie persistence across requests per proxy
-- **Weighted proxy selection** — probabilistic routing with cooldown/retry logic
+- **12 attack modes**: normal, bandwidth, slowread, imageopt, largepost, assetspray, rangereq, cookiebomb, ssr, middleware, requestflood, notfound
+- **Proxy rotation** via scraping public lists or custom proxy file
+- **Tor support**: auto-detect local Tor, use TOR_PROXY env var, or --tor-proxy flag
+- **Browser spoofing**: 10 realistic browser profiles with randomized header ordering
+- **Domain probing**: auto-detect Vercel, Cloudflare, image optimization, APIs, middleware
+- **Session cookies**: proxy-aware cookie persistence
+- **CSV output**: machine-readable results
 
 ## Usage
 
-```bash
-# Default (scrape proxies, normal attack, 20 concurrency, 30s)
-./simulate_load_rust
-
-# Custom target
-./simulate_load_rust https://example.com
-
-# With Tor
-./simulate_load_rust https://example.com tor normal 50 60
-
-# With cookie bomb attack
-./simulate_load_rust https://example.com scrape cookiebomb 30 120
+```
+simulate_load_rust [OPTIONS] [target_url] [mode] [attack_mode] [concurrency] [duration_secs]
 ```
 
-### Arguments
+### Options
 
-| Arg | Default | Description |
-|-----|---------|-------------|
-| target_url | https://livdevries.com | Target website |
-| mode | scrape | Proxy source: `scrape`, `tor`, `scrape-tor` |
-| attack_mode | normal | Traffic pattern (see attack modes below) |
-| concurrency | 20 | Simultaneous connections |
-| duration_secs | 30 | How long to run |
+| Flag | Description |
+|------|-------------|
+| `-h, --help` | Show help |
+| `-v, --version` | Show version |
+| `--list-modes` | List attack modes |
+| `--dry-run` | Probe domain only, skip load test |
+| `--output CSV` | Write results to CSV file |
+| `--proxy-file F` | Load proxies from file (one per line or comma-separated) |
+| `--tor-proxy URL` | Custom Tor proxy URL |
+| `--delay MS` | Per-request delay in milliseconds |
+| `--max-errors N` | Stop after N failed requests |
 
-### Attack Modes
+### Modes (proxy source)
 
-| Mode | Behavior |
-|------|----------|
-| `normal` | Fetch scanned assets randomly |
-| `bandwidth` | Same as normal |
-| `slowread` | Streams body with 100ms delays |
-| `imageopt` | Uses HTTP Range headers for images |
-| `largepost` | POST with 5-20KB body |
-| `assetspray` | Floods all discovered static assets |
-| `rangereq` | HTTP Range requests on assets |
-| `cookiebomb` | Sends 16 random cookies per request |
-| `ssr` | Targets API endpoints |
-| `middleware` | Repeatedly hits static assets |
-| `requestflood` | Zero-delay rapid requests |
-| `notfound` | Random /nonexistent-* 404 URLs |
+- `scrape` — Scrape free proxy lists (default)
+- `tor` — Use local Tor relay
+- `scrape-tor` — Scrape first, fall back to Tor if empty
+
+### Attack modes
+
+| Mode | Description |
+|------|-------------|
+| `normal` | Standard HTTP GET via discovered static assets |
+| `bandwidth` | Maximize bandwidth consumption |
+| `slowread` | Slow download simulation |
+| `imageopt` | Hit image optimization endpoints |
+| `largepost` | Large POST payloads |
+| `assetspray` | Hit every discovered static asset |
+| `rangereq` | Range header byte-range requests |
+| `cookiebomb` | Cookie bomb (16 random cookies) |
+| `ssr` | Server-side rendering endpoints |
+| `middleware` | Middleware/edge endpoint stress |
+| `requestflood` | No-delay request flood |
+| `notfound` | 404 storm (random nonexistent paths) |
+
+## Examples
+
+```bash
+# Basic load test (default: livdevries.com, scrape mode, normal attack)
+./simulate_load_rust 2>&1
+
+# Custom target with Tor and bandwidth attack
+./simulate_load_rust https://example.com tor bandwidth 50 60 2>&1
+
+# Dry-run domain probe (no load test)
+./simulate_load_rust --dry-run https://example.com 2>&1
+
+# Use custom proxy file
+./simulate_load_rust --proxy-file=/tmp/proxies.txt --delay=100 https://example.com 2>&1
+
+# CSV output with error limit
+./simulate_load_rust --output=results.csv --max-errors=100 https://example.com 2>&1
+```
+
+## Proxy file format
+
+One proxy per line, or comma-separated:
+
+```
+http://1.2.3.4:8080
+http://5.6.7.8:3128
+socks5://10.0.0.1:1080
+```
 
 ## Build
 
@@ -59,12 +90,9 @@ Single-system load testing tool for web applications. Uses proxy pools with rand
 cargo build --release
 ```
 
-## Requirements
+## Notes
 
-- Rust toolchain
-- Tor (optional) — listens on `127.0.0.1:9050`
-- `TOR_PROXY` env var for custom Tor endpoint
-
-## License
-
-Private.
+- Requires `--tor-proxy` or running Tor locally (`127.0.0.1:9050`) for Tor mode
+- Proxy scraping uses 30+ public lists with HTML and raw text parsers
+- All requests use randomized browser headers with shuffled header order
+- Domain probing auto-discovers assets, APIs, and platform features
