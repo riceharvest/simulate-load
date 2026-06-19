@@ -78,6 +78,8 @@ fn print_help() {
     println!("  -h, --help      Show this help");
     println!("  --dry-run       Only probe the domain, exit without load test");
     println!("  --output CSV    Write results to CSV file");
+    println!("  --proxy-file F  Load proxy list from file (one per line or comma-separated)");
+    println!("  --tor-proxy URL Specify custom Tor proxy URL (e.g. socks5://127.0.0.1:9050)");
     println!("");
     println!("Modes: scrape, tor, scrape-tor (proxy source)");
     println!("Attack modes: normal, bandwidth, slowread, imageopt, largepost, assetspray,");
@@ -606,16 +608,22 @@ async fn main() {
     // Parse flags
     let mut dry_run = false;
     let mut output_csv: Option<String> = None;
+    let mut proxy_file: Option<String> = None;
+    let mut tor_proxy: Option<String> = None;
     let mut positional: Vec<&str> = Vec::new();
     for arg in args.iter().skip(1) {
         match arg.as_str() {
             "--dry-run" => dry_run = true,
             "--output" => {},
+            "--proxy-file" => {},
+            "--tor-proxy" => {},
             other => {
-                if other.starts_with("--output") {
-                    if let Some(path) = other.strip_prefix("--output=") {
-                        output_csv = Some(path.to_string());
-                    }
+                if other.starts_with("--output=") {
+                    output_csv = Some(other.strip_prefix("--output=").unwrap().to_string());
+                } else if other.starts_with("--proxy-file=") {
+                    proxy_file = Some(other.strip_prefix("--proxy-file=").unwrap().to_string());
+                } else if other.starts_with("--tor-proxy=") {
+                    tor_proxy = Some(other.strip_prefix("--tor-proxy=").unwrap().to_string());
                 } else {
                     positional.push(other);
                 }
@@ -668,7 +676,29 @@ async fn main() {
     println!("  {}", status);
     println!("");
     println!("[2/3] Acquiring proxies...");
-    let proxies = get_proxies(state.lock().await.mode, &state).await;
+    // Handle --proxy-file and --tor-proxy first (bypass scraping)
+    let proxies = if let Some(path) = &proxy_file {
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        let list: Vec<String> = content
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter_map(|s| { let s = s.trim(); if !s.is_empty() { Some(s.to_string()) } else { None }})
+            .collect();
+        if list.is_empty() {
+            eprintln!("  No proxies found in file {}", path);
+            None
+        } else {
+            println!("  Loaded {} proxies from file", list.len());
+            Some(list)
+        }
+    } else if let Some(url) = &tor_proxy {
+        let n = concurrency.min(20);
+        let mut p = Vec::with_capacity(n);
+        for i in 0..n { p.push(format!("socks5://tor{}:isolate@{}", i, url.trim_start_matches("socks5://").trim_start_matches("http://"))); }
+        println!("  Using TOR_PROXY: {} ({} circuits)", url, n);
+        Some(p)
+    } else {
+        get_proxies(state.lock().await.mode, &state).await
+    };
     match proxies {
         None => {
             eprintln!("  Failed to get proxies. Exiting.");
