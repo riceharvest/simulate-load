@@ -76,6 +76,8 @@ fn print_help() {
     println!("");
     println!("Options:");
     println!("  -h, --help      Show this help");
+    println!("  -v, --version   Show version");
+    println!("  --list-modes    List available attack modes");
     println!("  --dry-run       Only probe the domain, exit without load test");
     println!("  --output CSV    Write results to CSV file");
     println!("  --proxy-file F  Load proxy list from file (one per line or comma-separated)");
@@ -615,6 +617,8 @@ async fn main() {
     }
     // Parse flags
     let mut dry_run = false;
+    let mut version = false;
+    let mut list_modes = false;
     let mut output_csv: Option<String> = None;
     let mut proxy_file: Option<String> = None;
     let mut tor_proxy: Option<String> = None;
@@ -623,6 +627,8 @@ async fn main() {
     let mut positional: Vec<&str> = Vec::new();
     for arg in args.iter().skip(1) {
         match arg.as_str() {
+            "--version" => version = true,
+            "--list-modes" => list_modes = true,
             "--dry-run" => dry_run = true,
             "--output" => {},
             "--proxy-file" => {},
@@ -651,6 +657,27 @@ async fn main() {
     let attack_str = positional.get(2).copied().unwrap_or("normal");
     let concurrency: usize = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
     let duration_secs: u64 = positional.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
+
+    if version {
+        println!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if list_modes {
+        println!("Attack modes:");
+        println!("  normal        Standard HTTP GET requests");
+        println!("  bandwidth     Heavy bandwidth consumption");
+        println!("  slowread      Slow read (deliberate slow download)");
+        println!("  imageopt      Image optimization endpoints");
+        println!("  largepost     Large POST requests");
+        println!("  assetspray    Spray all static assets");
+        println!("  rangereq      Range header requests");
+        println!("  cookiebomb    Cookie bomb (many cookies)");
+        println!("  ssr           Server-side rendering endpoints");
+        println!("  middleware    Middleware/edge endpoint stress");
+        println!("  requestflood  No-delay request flood");
+        println!("  notfound      404 storm (nonexistent paths)");
+        return;
+    }
 
     println!("=== Simulate Load Rust ===");
     println!("Target: {}", target_url);
