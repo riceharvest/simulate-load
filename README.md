@@ -25,12 +25,15 @@ simulate_load_rust [OPTIONS] [target_url] [mode] [attack_mode] [concurrency] [du
 | `-h, --help` | Show help |
 | `-v, --version` | Show version |
 | `--list-modes` | List attack modes |
+| `--tor-only` | Force Tor-only mode (no scraping, fails if Tor unavailable) |
 | `--dry-run` | Probe domain only, skip load test |
+| `--verify` | Verify proxies, show alive count, exit without load test |
 | `--output CSV` | Write results to CSV file |
 | `--proxy-file F` | Load proxies from file (one per line or comma-separated) |
 | `--tor-proxy URL` | Custom Tor proxy URL |
 | `--delay MS` | Per-request delay in milliseconds |
 | `--max-errors N` | Stop after N failed requests |
+| `--save-proxies F` | Save discovered proxies to file |
 
 ### Modes (proxy source)
 
