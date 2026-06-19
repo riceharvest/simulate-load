@@ -142,6 +142,7 @@ impl std::fmt::Display for AttackMode {
     }
 }
 
+#[allow(dead_code)]
 struct ProxyPool { clients: Vec<Client>, labels: Vec<String>, current: usize, cooldown_until: Vec<Instant>, failure_tier: Vec<u32>, succeeded: Vec<bool>, is_tor: Vec<bool>, weights: Vec<f64> }
 impl ProxyPool {
     fn new(proxies: &[String]) -> Self {
@@ -231,18 +232,6 @@ async fn tcp_check(addr: &str, timeout: u64) -> bool {
     tokio::time::timeout(Duration::from_secs(timeout), tokio::net::TcpStream::connect(a)).await.ok().and_then(|r| r.ok()).is_some()
 }
 
-async fn filter_alive(proxies: Vec<String>, state: &Arc<Mutex<AppState>>) -> Vec<String> {
-    let total = proxies.len(); let tc = state.lock().await.tcp_concurrency; let to = state.lock().await.validate_timeout_secs;
-    state.lock().await.tcp_total = total as u32; state.lock().await.status_msg = format!("TCP checking {} proxies...", total);
-    let sem = Arc::new(Semaphore::new(tc)); let alive = Arc::new(Mutex::new(Vec::new())); let done = Arc::new(AtomicUsize::new(0)); let s2 = Arc::clone(state); let mut h = Vec::with_capacity(total);
-    for p in proxies { let permit = Arc::clone(&sem).acquire_owned().await.unwrap(); let aa = Arc::clone(&alive); let dd = Arc::clone(&done); let ss = Arc::clone(&s2);
-        h.push(tokio::spawn(async move { if tcp_check(&p, to).await { aa.lock().await.push(p); } let n = dd.fetch_add(1, Ordering::Relaxed) + 1;
-            if n % 500 == 0 || n == total { ss.lock().await.tcp_checked = n as u32; ss.lock().await.status_msg = format!("TCP: {}/{}", n, total); } drop(permit); }));
-    }
-    for x in h { let _ = x.await; } let r = alive.lock().await.clone();
-    state.lock().await.total_alive = r.len(); state.lock().await.status_msg = format!("TCP check: {}/{} alive", r.len(), total); r
-}
-
 async fn fetch_page(c: Client, url: String, delay: u64, _ua: usize, proxy_id: String, sessions: Arc<Mutex<HashMap<String, String>>>) -> Result<usize, reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let builder = add_session_cookie(browser_request(c.get(&url)), &proxy_id, &sessions).await;
@@ -297,6 +286,7 @@ async fn fetch_cookie(c: Client, url: String, delay: u64, _ua: usize, proxy_id: 
     Ok(resp.bytes().await?.len())
 }
 
+#[allow(dead_code)]
 struct AppState {
     mode: ProxyMode, running: bool, iteration: u64, total_requests: u64, total_bytes: u64,
     proxy_count: usize, working_count: usize, active_count: usize, last_bytes: u64,
