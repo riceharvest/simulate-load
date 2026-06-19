@@ -69,6 +69,20 @@ impl BrowserHeaders {
 
 fn browser_request(builder: RequestBuilder) -> RequestBuilder { BrowserHeaders::random().apply(builder) }
 
+fn print_help() {
+    println!("Simulate Load Rust — single-system load testing tool");
+    println!("");
+    println!("Usage: {} [target_url] [mode] [attack_mode] [concurrency] [duration_secs]", env!("CARGO_PKG_NAME"));
+    println!("");
+    println!("Modes: scrape, tor, scrape-tor (proxy source)");
+    println!("Attack modes: normal, bandwidth, slowread, imageopt, largepost, assetspray,");
+    println!("              rangereq, cookiebomb, ssr, middleware, requestflood, notfound");
+    println!("");
+    println!("Examples:");
+    println!("  {} https://livdevries.com 2>&1", env!("CARGO_PKG_NAME"));
+    println!("  {} https://target.com tor normal 50 60 2>&1", env!("CARGO_PKG_NAME"));
+}
+
 async fn add_session_cookie(mut builder: RequestBuilder, proxy_id: &str, sessions: &Arc<Mutex<HashMap<String, String>>>) -> RequestBuilder {
     if let Some(cookie) = sessions.lock().await.get(proxy_id).cloned() {
         if !cookie.is_empty() { builder = builder.header("Cookie", cookie); }
@@ -143,19 +157,6 @@ impl ProxyPool {
         }
         let n = clients.len(); ProxyPool { clients, labels, current: 0, cooldown_until: vec![Instant::now(); n], failure_tier: vec![0; n], succeeded: vec![false; n], is_tor, weights }
     }
-    fn reroll_tor(&mut self, idx: usize) {
-        let n = (rand::rng().random_range(0..9999)) + 100;
-        if let Some(at) = self.labels[idx].find('@') {
-            let base = &self.labels[idx][at+1..];
-            self.labels[idx] = format!("socks5://tor{}:isolate@{}", n, base);
-            if let Ok(p) = reqwest::Proxy::all(&self.labels[idx]) {
-                if let Ok(c) = browser_client_builder().proxy(p).build() { self.clients[idx] = c; }
-            }
-        }
-        self.cooldown_until[idx] = Instant::now();
-        self.failure_tier[idx] = 0;
-        self.succeeded[idx] = false;
-    }
     fn next(&mut self) -> Option<(usize, Client)> {
         let now = Instant::now();
         let weights_vec: Vec<f64> = self.weights.iter().map(|&w| w as f64).collect();
@@ -165,27 +166,6 @@ impl ProxyPool {
         if self.cooldown_until[idx] <= now { return Some((idx, self.clients[idx].clone())); }
         None
     }
-    fn report(&mut self, idx: usize, bytes: u64) -> Option<(Duration, u32)> {
-        if idx >= self.clients.len() { return None; }
-        if bytes == 0 && self.is_tor[idx] { self.reroll_tor(idx); return Some((Duration::ZERO, 0)); }
-        if bytes == 0 && self.succeeded[idx] { return None; }
-        if bytes > 0 {
-            if !self.succeeded[idx] {
-                self.succeeded[idx] = true;
-                self.failure_tier[idx] = 0;
-                self.cooldown_until[idx] = Instant::now();
-                return Some((Duration::ZERO, 0));
-            }
-            return None;
-        }
-        let tier = self.failure_tier[idx].min(4); let ms = 2000u64 * 5u64.pow(tier);
-        self.cooldown_until[idx] = Instant::now() + Duration::from_millis(ms);
-        self.failure_tier[idx] = tier + 1;
-        if bytes > 0 { self.weights[idx] += 0.5; } else { self.weights[idx] = (self.weights[idx] - 1.0).max(0.1); }
-        Some((Duration::from_millis(ms), tier))
-    }
-    fn active(&self) -> usize { let now = Instant::now(); self.cooldown_until.iter().filter(|&&t| t <= now).count() }
-    fn working(&self) -> usize { self.succeeded.iter().filter(|&&s| s).count() }
 }
 
 const HTML_SRC: &[&str] = &["https://free-proxy-list.net/", "https://www.sslproxies.org/", "https://www.us-proxy.org/", "https://free-proxy-list.net/anonymous-proxy.html", "https://free-proxy-list.net/uk-proxy.html", "https://www.socks-proxy.net/"];
@@ -261,23 +241,6 @@ async fn filter_alive(proxies: Vec<String>, state: &Arc<Mutex<AppState>>) -> Vec
     }
     for x in h { let _ = x.await; } let r = alive.lock().await.clone();
     state.lock().await.total_alive = r.len(); state.lock().await.status_msg = format!("TCP check: {}/{} alive", r.len(), total); r
-}
-
-async fn try_proxy_url(url: &str) -> bool {
-    if let Ok(p) = reqwest::Proxy::all(url) {
-        if let Ok(c) = browser_client_builder().proxy(p).timeout(Duration::from_secs(6)).build() {
-            if let Ok(r) = browser_request(c.get("https://httpbin.org/ip")).send().await {
-                if let Ok(b) = r.bytes().await { return !b.is_empty(); }
-            }
-        }
-    }
-    false
-}
-
-async fn validate_proxy(addr: &str) -> Option<String> {
-    let u = format!("http://{}", addr); if try_proxy_url(&u).await { return Some(u); }
-    let s5 = format!("socks5://{}", addr); let s4 = format!("socks4://{}", addr);
-    let (a, b) = tokio::join!(try_proxy_url(&s5), try_proxy_url(&s4)); if a { Some(s5) } else if b { Some(s4) } else { None }
 }
 
 async fn fetch_page(c: Client, url: String, delay: u64, _ua: usize, proxy_id: String, sessions: Arc<Mutex<HashMap<String, String>>>) -> Result<usize, reqwest::Error> {
@@ -624,6 +587,10 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<Mutex<ProxyPool>>) {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && (args[1] == "-h" || args[1] == "--help") {
+        print_help();
+        return;
+    }
     let target_url = args.get(1).map(|s| s.as_str()).unwrap_or(DEFAULT_TARGET_URL);
     let mode_str = args.get(2).map(|s| s.as_str()).unwrap_or("scrape");
     let attack_str = args.get(3).map(|s| s.as_str()).unwrap_or("normal");
