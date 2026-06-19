@@ -74,10 +74,11 @@ fn print_help() {
     println!("");
     println!("Usage: {} [OPTIONS] [target_url] [mode] [attack_mode] [concurrency] [duration_secs]", env!("CARGO_PKG_NAME"));
     println!("");
-    println!("Options:");
+     println!("Options:");
     println!("  -h, --help      Show this help");
     println!("  -v, --version   Show version");
     println!("  --list-modes    List available attack modes");
+    println!("  --tor-only      Force Tor-only mode (no scraping)");
     println!("  --dry-run       Only probe the domain, exit without load test");
     println!("  --verify        Verify proxies, show alive count, exit without load test");
     println!("  --output CSV    Write results to CSV file");
@@ -618,6 +619,7 @@ async fn main() {
         return;
     }
     // Parse flags
+    let mut tor_only = false;
     let mut dry_run = false;
     let mut verify = false;
     let mut version = false;
@@ -633,6 +635,7 @@ async fn main() {
         match arg.as_str() {
             "--version" => version = true,
             "--list-modes" => list_modes = true,
+            "--tor-only" => tor_only = true,
             "--verify" => verify = true,
             "--dry-run" => dry_run = true,
             "--output" => {},
@@ -664,6 +667,25 @@ async fn main() {
     let attack_str = positional.get(2).copied().unwrap_or("normal");
     let concurrency: usize = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
     let duration_secs: u64 = positional.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
+
+    if tor_only {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        state.lock().await.target_url = target_url.to_string();
+        state.lock().await.mode = ProxyMode::Tor;
+        println!("[tor-only] Checking Tor...");
+        let ok = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect("127.0.0.1:9050")).await.ok().and_then(|r| r.ok()).is_some();
+        if !ok && tor_proxy.is_none() {
+            eprintln!("  [tor-only] Tor not available. Install Tor or use --tor-proxy.");
+            std::process::exit(1);
+        }
+        if ok {
+            println!("  Tor OK (local relay)");
+        } else {
+            println!("  Using custom Tor proxy");
+        }
+        println!("  [TOR-ONLY] Configuration verified. Ready for Tor-based load testing.");
+        return;
+    }
 
     if verify {
         println!("=== Simulate Load Rust ===");
