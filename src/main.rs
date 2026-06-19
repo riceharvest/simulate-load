@@ -72,13 +72,19 @@ fn browser_request(builder: RequestBuilder) -> RequestBuilder { BrowserHeaders::
 fn print_help() {
     println!("Simulate Load Rust — single-system load testing tool");
     println!("");
-    println!("Usage: {} [target_url] [mode] [attack_mode] [concurrency] [duration_secs]", env!("CARGO_PKG_NAME"));
+    println!("Usage: {} [OPTIONS] [target_url] [mode] [attack_mode] [concurrency] [duration_secs]", env!("CARGO_PKG_NAME"));
+    println!("");
+    println!("Options:");
+    println!("  -h, --help      Show this help");
+    println!("  --dry-run       Only probe the domain, exit without load test");
+    println!("  --output CSV    Write results to CSV file");
     println!("");
     println!("Modes: scrape, tor, scrape-tor (proxy source)");
     println!("Attack modes: normal, bandwidth, slowread, imageopt, largepost, assetspray,");
     println!("              rangereq, cookiebomb, ssr, middleware, requestflood, notfound");
     println!("");
     println!("Examples:");
+    println!("  {} --dry-run https://livdevries.com", env!("CARGO_PKG_NAME"));
     println!("  {} https://livdevries.com 2>&1", env!("CARGO_PKG_NAME"));
     println!("  {} https://target.com tor normal 50 60 2>&1", env!("CARGO_PKG_NAME"));
 }
@@ -574,6 +580,22 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<Mutex<ProxyPool>>) {
     }
 }
 
+fn write_probe_csv(path: &str, target: &str, status: &str, proxies: &[String], concurrency: usize, attack: &str) {
+    let status_escaped = status.replace(',', ";");
+    let content = format!("target,status,proxy_count,concurrency,attack_mode\n{},{},{},{},{}\n", target, status_escaped, proxies.len(), concurrency, attack);
+    std::fs::write(path, content).unwrap();
+    println!("  CSV written to {}", path);
+}
+
+fn write_results_csv(path: &str, target: &str, status: &str, proxies: &[String], concurrency: usize, attack: &str, total_reqs: u64, total_bytes: u64, duration: u64) {
+    let status_escaped = status.replace(',', ";");
+    let content = format!("target,status,proxy_count,concurrency,attack_mode,total_requests,total_bytes,duration_sec,kb_per_sec\n{},{},{},{},{},{},{},{}{:.2}\n",
+        target, status_escaped, proxies.len(), concurrency, attack,
+        total_reqs, total_bytes, duration, total_bytes as f64 / duration as f64 / 1024.0);
+    std::fs::write(path, content).unwrap();
+    println!("  CSV written to {}", path);
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -581,11 +603,30 @@ async fn main() {
         print_help();
         return;
     }
-    let target_url = args.get(1).map(|s| s.as_str()).unwrap_or(DEFAULT_TARGET_URL);
-    let mode_str = args.get(2).map(|s| s.as_str()).unwrap_or("scrape");
-    let attack_str = args.get(3).map(|s| s.as_str()).unwrap_or("normal");
-    let concurrency: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(20);
-    let duration_secs: u64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(30);
+    // Parse flags
+    let mut dry_run = false;
+    let mut output_csv: Option<String> = None;
+    let mut positional: Vec<&str> = Vec::new();
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "--dry-run" => dry_run = true,
+            "--output" => {},
+            other => {
+                if other.starts_with("--output") {
+                    if let Some(path) = other.strip_prefix("--output=") {
+                        output_csv = Some(path.to_string());
+                    }
+                } else {
+                    positional.push(other);
+                }
+            }
+        }
+    }
+    let target_url = positional.get(0).copied().unwrap_or(DEFAULT_TARGET_URL);
+    let mode_str = positional.get(1).copied().unwrap_or("scrape");
+    let attack_str = positional.get(2).copied().unwrap_or("normal");
+    let concurrency: usize = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
+    let duration_secs: u64 = positional.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
 
     println!("=== Simulate Load Rust ===");
     println!("Target: {}", target_url);
@@ -626,13 +667,23 @@ async fn main() {
     };
     println!("  {}", status);
     println!("");
-
-    // Get proxies
     println!("[2/3] Acquiring proxies...");
     let proxies = get_proxies(state.lock().await.mode, &state).await;
     match proxies {
+        None => {
+            eprintln!("  Failed to get proxies. Exiting.");
+            std::process::exit(1);
+        }
         Some(prox_list) => {
             println!("  Got {} proxies", prox_list.len());
+            if dry_run {
+                println!("  [DRY RUN] Skipping load test. Use without --dry-run to execute.");
+                // Write CSV output if requested
+                if let Some(path) = &output_csv {
+                    write_probe_csv(path, target_url, &status, &prox_list, concurrency, attack_str);
+                }
+                return;
+            }
             let pool = Arc::new(Mutex::new(ProxyPool::new(&prox_list)));
             println!("[3/3] Running load for {}s...", duration_secs);
             state.lock().await.running = true;
@@ -651,10 +702,10 @@ async fn main() {
                 )
             };
             println!("  {}", final_stats);
-        }
-        None => {
-            eprintln!("  Failed to get proxies. Exiting.");
-            std::process::exit(1);
+            if let Some(ref path) = output_csv {
+                write_results_csv(path, target_url, &status, &prox_list, concurrency, attack_str,
+                    state.lock().await.total_requests, state.lock().await.total_bytes, duration_secs);
+            }
         }
     }
 }
