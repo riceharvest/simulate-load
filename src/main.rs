@@ -413,7 +413,7 @@ async fn scrape_all(c: &Client, state: &Arc<Mutex<AppState>>) -> Vec<String> {
         let st = state.lock().await;
         (st.max_scrape, st.custom_selector.clone())
     };
-    let re = Arc::new(Regex::new(r"(\d{1,3}\.\d{1,3}:\d+)").unwrap());
+    let re = Arc::new(Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)").unwrap());
     let all = Arc::new(Mutex::new(Vec::new()));
     let sem = Arc::new(Semaphore::new(10));
     let done = Arc::new(AtomicBool::new(false));
@@ -862,7 +862,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
 }
 
 async fn filter_alive_proxies(proxies: &[String], state: &Arc<Mutex<AppState>>) -> Vec<String> {
-    let to = 1u64;
+    let to = 3u64;
     let tc = 1000usize;
     let total = proxies.len();
     state.lock().await.tcp_total = total as u32;
@@ -932,7 +932,10 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
             };
             let c = browser_client_builder(&config).timeout(Duration::from_secs(15)).build().unwrap();
             let scraped = match tokio::time::timeout(Duration::from_secs(30), scrape_all(&c, state)).await {
-                Ok(res) => res,
+                Ok(res) => {
+                    println!("  Scraped {} proxy candidates from online sources.", res.len());
+                    res
+                }
                 Err(_) => {
                     let mut st = state.lock().await;
                     st.status_msg = "Proxy scraping timed out".to_string();
@@ -945,7 +948,14 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
             }
             state.lock().await.status_msg = format!("{} proxies scraped", scraped.len());
             state.lock().await.total_scraped = scraped.len();
-            let sample: Vec<String> = scraped.into_iter().take(2000).collect();
+            
+            let sample: Vec<String> = {
+                use rand::seq::SliceRandom;
+                let mut rng = rand::rng();
+                let mut shuffled_scraped = scraped;
+                shuffled_scraped.shuffle(&mut rng);
+                shuffled_scraped.into_iter().take(3000).collect()
+            };
             let alive = filter_alive_proxies(&sample, state).await;
             state.lock().await.total_alive = alive.len(); state.lock().await.status_msg = format!("TCP alive: {}", alive.len());
             let mut result = alive;

@@ -12,3 +12,7 @@ url = "2.5"
 scraper = "0.22"
 regex = "1"
 rand = { version = "0.10", features = ["std_rng"] }
+
+[[bin]]
+name = "check_proxy"
+path = "scratch/check_proxy.rs"
