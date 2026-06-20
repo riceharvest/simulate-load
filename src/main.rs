@@ -142,7 +142,11 @@ fn update_session_from_headers(proxy_idx: usize, sessions: &[std::sync::Mutex<St
 }
 
 fn browser_client_builder() -> reqwest::ClientBuilder {
-    Client::builder().timeout(Duration::from_secs(10))
+    Client::builder()
+        .timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(20)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_nodelay(true)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -857,6 +861,7 @@ async fn main() {
     let mut tor_proxy: Option<String> = None;
     let mut delay_ms: u64 = 0;
     let mut max_errors: Option<u64> = None;
+    let mut config_file: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
 
     let mut args_iter = args.into_iter().skip(1);
@@ -901,6 +906,11 @@ async fn main() {
                     save_proxies = Some(val);
                 }
             }
+            "--config" => {
+                if let Some(val) = args_iter.next() {
+                    config_file = Some(val);
+                }
+            }
             other => {
                 if other.starts_with("--output=") {
                     output_csv = Some(other.strip_prefix("--output=").unwrap().to_string());
@@ -914,6 +924,8 @@ async fn main() {
                     max_errors = other.strip_prefix("--max-errors=").unwrap().parse().ok();
                 } else if other.starts_with("--save-proxies=") {
                     save_proxies = Some(other.strip_prefix("--save-proxies=").unwrap().to_string());
+                } else if other.starts_with("--config=") {
+                    config_file = Some(other.strip_prefix("--config=").unwrap().to_string());
                 } else if other.starts_with('-') {
                     eprintln!("Unknown option: {}", other);
                     std::process::exit(1);
@@ -924,11 +936,42 @@ async fn main() {
         }
     }
 
-    let target_url = positional.get(0).cloned().unwrap_or_else(|| DEFAULT_TARGET_URL.to_string());
-    let mode_str = positional.get(1).map(|s| s.as_str()).unwrap_or("scrape");
-    let attack_str = positional.get(2).map(|s| s.as_str()).unwrap_or("normal");
-    let concurrency: usize = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
-    let duration_secs: u64 = positional.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
+    let mut target_url = positional.get(0).cloned().unwrap_or_else(|| DEFAULT_TARGET_URL.to_string());
+    let mut mode_str = positional.get(1).cloned().unwrap_or_else(|| "scrape".to_string());
+    let mut attack_str = positional.get(2).cloned().unwrap_or_else(|| "normal".to_string());
+    let mut concurrency: usize = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
+    let mut duration_secs: u64 = positional.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
+
+    // Load configurations from config file if supplied
+    if let Some(path) = &config_file {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            println!("  Loading config from {}...", path);
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+                if let Some(pos) = trimmed.find('=') {
+                    let key = trimmed[..pos].trim();
+                    let val = trimmed[pos+1..].trim();
+                    match key {
+                        "target_url" | "target" => target_url = val.to_string(),
+                        "mode" => mode_str = val.to_string(),
+                        "attack" | "attack_mode" => attack_str = val.to_string(),
+                        "concurrency" => if let Ok(parsed) = val.parse() { concurrency = parsed; },
+                        "duration" | "duration_secs" => if let Ok(parsed) = val.parse() { duration_secs = parsed; },
+                        "delay" | "delay_ms" => if let Ok(parsed) = val.parse() { delay_ms = parsed; },
+                        "max_errors" => max_errors = val.parse().ok(),
+                        "proxy_file" => proxy_file = Some(val.to_string()),
+                        "tor_proxy" => tor_proxy = Some(val.to_string()),
+                        "save_proxies" => save_proxies = Some(val.to_string()),
+                        "output_csv" | "output" => output_csv = Some(val.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+        } else {
+            eprintln!("  Warning: Config file {} not found or unreadable.", path);
+        }
+    }
 
     if tor_only {
         let state = Arc::new(Mutex::new(AppState::new()));
@@ -960,7 +1003,7 @@ async fn main() {
         let state = Arc::new(Mutex::new(AppState::new()));
         state.lock().await.target_url = target_url.to_string();
         state.lock().await.load_concurrency = concurrency;
-        state.lock().await.attack_mode = match attack_str {
+        state.lock().await.attack_mode = match attack_str.as_str() {
             "bandwidth" => AttackMode::Bandwidth,
             "slowread" => AttackMode::SlowRead,
             "imageopt" => AttackMode::ImageOpt,
@@ -974,7 +1017,7 @@ async fn main() {
             "notfound" => AttackMode::NotFound,
             _ => AttackMode::Normal,
         };
-        match mode_str {
+        match mode_str.as_str() {
             "tor" => state.lock().await.mode = ProxyMode::Tor,
             "scrape-tor" => state.lock().await.mode = ProxyMode::ScrapeTorFallback,
             _ => state.lock().await.mode = ProxyMode::Scrape,
@@ -1061,7 +1104,7 @@ async fn main() {
     let state = Arc::new(Mutex::new(AppState::new()));
     state.lock().await.target_url = target_url.to_string();
     state.lock().await.load_concurrency = concurrency;
-    state.lock().await.attack_mode = match attack_str {
+    state.lock().await.attack_mode = match attack_str.as_str() {
         "bandwidth" => AttackMode::Bandwidth,
         "slowread" => AttackMode::SlowRead,
         "imageopt" => AttackMode::ImageOpt,
@@ -1076,7 +1119,7 @@ async fn main() {
         _ => AttackMode::Normal,
     };
 
-    match mode_str {
+    match mode_str.as_str() {
         "tor" => state.lock().await.mode = ProxyMode::Tor,
         "scrape-tor" => state.lock().await.mode = ProxyMode::ScrapeTorFallback,
         _ => state.lock().await.mode = ProxyMode::Scrape,
@@ -1132,7 +1175,7 @@ async fn main() {
                 println!("  [DRY RUN] Skipping load test. Use without --dry-run to execute.");
                 // Write CSV output if requested
                 if let Some(path) = &output_csv {
-                    write_probe_csv(path, &target_url, &status, &prox_list, concurrency, attack_str);
+                    write_probe_csv(path, &target_url, &status, &prox_list, concurrency, &attack_str);
                 }
                 return;
             }
@@ -1216,7 +1259,7 @@ async fn main() {
             );
             println!("  {}", final_stats);
             if let Some(ref path) = output_csv {
-                write_results_csv(path, &target_url, &status, &prox_list, concurrency, attack_str,
+                write_results_csv(path, &target_url, &status, &prox_list, concurrency, &attack_str,
                     final_reqs, final_bytes, elapsed_secs);
             }
         }
