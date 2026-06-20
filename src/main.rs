@@ -362,6 +362,11 @@ fn detect_scheme(url: &str) -> &'static str {
 }
 
 async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Vec<String> {
+    use std::sync::OnceLock;
+    static RE_IP_PORT: OnceLock<Regex> = OnceLock::new();
+    static SEL_TR: OnceLock<Selector> = OnceLock::new();
+    static SEL_TD: OnceLock<Selector> = OnceLock::new();
+
     let scheme = detect_scheme(url);
     let r = match tokio::time::timeout(Duration::from_secs(8), browser_request(c.get(url)).send()).await { Ok(Ok(r)) => r, _ => return vec![] };
     let h = match tokio::time::timeout(Duration::from_secs(8), r.text()).await { Ok(Ok(t)) => t, _ => return vec![] };
@@ -369,9 +374,9 @@ async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Ve
     let mut out = vec![];
     if let Some(sel_str) = custom_selector {
         if let Ok(s) = Selector::parse(sel_str) {
+            let re = RE_IP_PORT.get_or_init(|| Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)").unwrap());
             for el in doc.select(&s) {
                 let text = el.text().collect::<String>();
-                let re = Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)").unwrap();
                 for cap in re.captures_iter(&text) {
                     if cap.len() >= 3 {
                         out.push(format!("{}://{}:{}", scheme, &cap[1], &cap[2]));
@@ -380,10 +385,10 @@ async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Ve
             }
         }
     } else {
-        let tr = Selector::parse("table.table tbody tr").unwrap();
-        let td = Selector::parse("td").unwrap();
-        for row in doc.select(&tr) {
-            let cells: Vec<String> = row.select(&td).map(|c| c.text().collect::<String>().trim().to_string()).collect();
+        let tr = SEL_TR.get_or_init(|| Selector::parse("table.table tbody tr").unwrap());
+        let td = SEL_TD.get_or_init(|| Selector::parse("td").unwrap());
+        for row in doc.select(tr) {
+            let cells: Vec<String> = row.select(td).map(|c| c.text().collect::<String>().trim().to_string()).collect();
             if cells.len() >= 2 {
                 let ip = cells[0].trim().to_string();
                 let port = cells[1].trim().to_string();
