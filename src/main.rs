@@ -33,36 +33,50 @@ const BROWSER_PROFILES: &[BrowserProfile] = &[
     BrowserProfile { ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1", sec_ch_ua: None, platform: None, mobile: "?1" },
 ];
 
-struct BrowserHeaders { ordered: Vec<(String, String)> }
+struct BrowserHeaders {
+    headers: [(&'static str, &'static str); 15],
+    len: usize,
+}
 impl BrowserHeaders {
     fn random() -> Self {
         let mut rng = rand::rng();
         let profile = &BROWSER_PROFILES[rng.random_range(0..BROWSER_PROFILES.len())];
-        let mut ordered = vec![
-            ("User-Agent".to_string(), profile.ua.to_string()),
-            ("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8".to_string()),
-            ("Accept-Language".to_string(), if rng.random_bool(0.33) { "en-GB,en;q=0.9".to_string() } else { "en-US,en;q=0.9".to_string() }),
-            ("Accept-Encoding".to_string(), "gzip, deflate, br".to_string()),
-            ("Cache-Control".to_string(), "no-cache".to_string()),
-            ("Pragma".to_string(), "no-cache".to_string()),
-            ("Upgrade-Insecure-Requests".to_string(), "1".to_string()),
-            ("Sec-Fetch-Dest".to_string(), "document".to_string()),
-            ("Sec-Fetch-Mode".to_string(), "navigate".to_string()),
-            ("Sec-Fetch-Site".to_string(), "none".to_string()),
-            ("Sec-Fetch-User".to_string(), "?1".to_string()),
-            ("Connection".to_string(), "keep-alive".to_string()),
-        ];
-        if let Some(v) = profile.sec_ch_ua { ordered.push(("Sec-CH-UA".to_string(), v.to_string())); }
-        if let Some(v) = profile.platform { ordered.push(("Sec-CH-UA-Platform".to_string(), v.to_string())); }
-        ordered.push(("Sec-CH-UA-Mobile".to_string(), profile.mobile.to_string()));
+        let mut headers = [("", ""); 15];
+        headers[0] = ("User-Agent", profile.ua);
+        headers[1] = ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8");
+        headers[2] = ("Accept-Language", if rng.random_bool(0.33) { "en-GB,en;q=0.9" } else { "en-US,en;q=0.9" });
+        headers[3] = ("Accept-Encoding", "gzip, deflate, br");
+        headers[4] = ("Cache-Control", "no-cache");
+        headers[5] = ("Pragma", "no-cache");
+        headers[6] = ("Upgrade-Insecure-Requests", "1");
+        headers[7] = ("Sec-Fetch-Dest", "document");
+        headers[8] = ("Sec-Fetch-Mode", "navigate");
+        headers[9] = ("Sec-Fetch-Site", "none");
+        headers[10] = ("Sec-Fetch-User", "?1");
+        headers[11] = ("Connection", "keep-alive");
         
-        for i in (1..ordered.len()).rev() {
-            ordered.swap(i, rng.random_range(0..i + 1));
+        let mut len = 12;
+        if let Some(v) = profile.sec_ch_ua {
+            headers[len] = ("Sec-CH-UA", v);
+            len += 1;
         }
-        BrowserHeaders { ordered }
+        if let Some(v) = profile.platform {
+            headers[len] = ("Sec-CH-UA-Platform", v);
+            len += 1;
+        }
+        headers[len] = ("Sec-CH-UA-Mobile", profile.mobile);
+        len += 1;
+        
+        for i in (1..len).rev() {
+            headers.swap(i, rng.random_range(0..i + 1));
+        }
+        BrowserHeaders { headers, len }
     }
     fn apply(&self, mut builder: RequestBuilder) -> RequestBuilder {
-        for (name, value) in &self.ordered { builder = builder.header(name, value); }
+        for i in 0..self.len {
+            let (name, value) = self.headers[i];
+            builder = builder.header(name, value);
+        }
         builder
     }
 }
@@ -167,6 +181,8 @@ struct ProxyPool {
     succeeded: Vec<bool>,
     is_tor: Vec<bool>,
     weights: Vec<f64>,
+    active_indices: Vec<usize>,
+    active_weights: Vec<f64>,
 }
 
 impl ProxyPool {
@@ -196,25 +212,34 @@ impl ProxyPool {
             succeeded: vec![false; n],
             is_tor,
             weights,
+            active_indices: Vec::with_capacity(n),
+            active_weights: Vec::with_capacity(n),
         }
     }
 
     fn next(&mut self) -> Option<(usize, Client)> {
         let now = Instant::now();
-        let mut active_indices = Vec::new();
-        let mut active_weights = Vec::new();
+        self.active_indices.clear();
+        self.active_weights.clear();
         for i in 0..self.clients.len() {
             if self.cooldown_until[i] <= now {
-                active_indices.push(i);
-                active_weights.push(self.weights[i]);
+                self.active_indices.push(i);
+                self.active_weights.push(self.weights[i]);
             }
         }
-        if active_indices.is_empty() {
+        if self.active_indices.is_empty() {
             return None;
         }
-        let dist = WeightedIndex::new(&active_weights).ok()?;
-        let sample_idx = dist.sample(&mut rand::rng());
-        let idx = active_indices[sample_idx];
+        let mut rng = rand::rng();
+        let first = self.active_weights[0];
+        if self.active_weights.iter().all(|&w| w == first) {
+            let sample_idx = rng.random_range(0..self.active_indices.len());
+            let idx = self.active_indices[sample_idx];
+            return Some((idx, self.clients[idx].clone()));
+        }
+        let dist = WeightedIndex::new(&self.active_weights).ok()?;
+        let sample_idx = dist.sample(&mut rng);
+        let idx = self.active_indices[sample_idx];
         Some((idx, self.clients[idx].clone()))
     }
 
