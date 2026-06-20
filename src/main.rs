@@ -118,6 +118,10 @@ fn print_help() {
     println!("  --proxy-file F        Load proxy list from file (one per line or comma-separated)");
     println!("  --tor-proxy URL       Specify custom Tor proxy URL (e.g. socks5://127.0.0.1:9050)");
     println!("  --tor-control ADDR    Specify custom Tor control port address (e.g. 127.0.0.1:9051)");
+    println!("  --tor-entry-guards G  Comma-separated entry guards for Tor");
+    println!("  --tor-bridges B       Semicolon-separated bridges for Tor");
+    println!("  --tor-circuit-timeout S Custom circuit build timeout in seconds");
+    println!("  --tor-ssthresh N      Limited slow start concurrency threshold (default: 20)");
     println!("  --delay MS            Per-request delay in milliseconds");
     println!("  --jitter MS           Random delay jitter in milliseconds");
     println!("  --max-errors N        Stop after N failed requests");
@@ -1127,6 +1131,47 @@ async fn cycle_tor_circuit(control_addr: &str) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+async fn configure_tor(
+    control_addr: &str,
+    entry_guards: Option<&str>,
+    bridges: Option<&str>,
+    circuit_timeout: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(control_addr).await?;
+    stream.write_all(b"AUTHENTICATE \"\"\r\n").await?;
+    let mut buf = [0u8; 1024];
+    let _ = stream.read(&mut buf).await?;
+
+    if let Some(guards) = entry_guards {
+        let cmd = format!("SETCONF EntryNodes=\"{}\" StrictNodes=1\r\n", guards);
+        stream.write_all(cmd.as_bytes()).await?;
+        let _ = stream.read(&mut buf).await?;
+    }
+
+    if let Some(brs) = bridges {
+        let mut cmd = "SETCONF UseBridges=1".to_string();
+        for br in brs.split(';') {
+            let trimmed = br.trim();
+            if !trimmed.is_empty() {
+                cmd.push_str(&format!(" Bridge=\"{}\"", trimmed));
+            }
+        }
+        cmd.push_str("\r\n");
+        stream.write_all(cmd.as_bytes()).await?;
+        let _ = stream.read(&mut buf).await?;
+    }
+
+    if let Some(timeout) = circuit_timeout {
+        let cmd = format!("SETCONF CircuitBuildTimeout={}\r\n", timeout);
+        stream.write_all(cmd.as_bytes()).await?;
+        let _ = stream.read(&mut buf).await?;
+    }
+
+    stream.write_all(b"QUIT\r\n").await?;
+    Ok(())
+}
+
 async fn resolve_target_dns(target_url: &str) -> Option<std::net::IpAddr> {
     let u = Url::parse(target_url).ok()?;
     let host = u.host_str()?;
@@ -1163,6 +1208,10 @@ async fn main() {
     let mut pool_max_idle = 20usize;
     let mut pool_idle_timeout_secs = 90u64;
     let mut tor_control = "127.0.0.1:9051".to_string();
+    let mut tor_entry_guards: Option<String> = None;
+    let mut tor_bridges: Option<String> = None;
+    let mut tor_circuit_timeout: Option<u64> = None;
+    let mut tor_ssthresh = 20usize;
     let mut sni: Option<String> = None;
     let mut jitter_ms = 0u64;
     let mut auto_tune = false;
@@ -1235,6 +1284,26 @@ async fn main() {
                     tor_control = val;
                 }
             }
+            "--tor-entry-guards" => {
+                if let Some(val) = args_iter.next() {
+                    tor_entry_guards = Some(val);
+                }
+            }
+            "--tor-bridges" => {
+                if let Some(val) = args_iter.next() {
+                    tor_bridges = Some(val);
+                }
+            }
+            "--tor-circuit-timeout" => {
+                if let Some(val) = args_iter.next() {
+                    tor_circuit_timeout = val.parse().ok();
+                }
+            }
+            "--tor-ssthresh" => {
+                if let Some(val) = args_iter.next() {
+                    tor_ssthresh = val.parse().unwrap_or(20);
+                }
+            }
             "--sni" => {
                 if let Some(val) = args_iter.next() {
                     sni = Some(val);
@@ -1270,6 +1339,14 @@ async fn main() {
                     pool_idle_timeout_secs = other.strip_prefix("--pool-idle-timeout=").unwrap().parse().unwrap_or(90);
                 } else if other.starts_with("--tor-control=") {
                     tor_control = other.strip_prefix("--tor-control=").unwrap().to_string();
+                } else if other.starts_with("--tor-entry-guards=") {
+                    tor_entry_guards = Some(other.strip_prefix("--tor-entry-guards=").unwrap().to_string());
+                } else if other.starts_with("--tor-bridges=") {
+                    tor_bridges = Some(other.strip_prefix("--tor-bridges=").unwrap().to_string());
+                } else if other.starts_with("--tor-circuit-timeout=") {
+                    tor_circuit_timeout = other.strip_prefix("--tor-circuit-timeout=").unwrap().parse().ok();
+                } else if other.starts_with("--tor-ssthresh=") {
+                    tor_ssthresh = other.strip_prefix("--tor-ssthresh=").unwrap().parse().unwrap_or(20);
                 } else if other.starts_with("--sni=") {
                     sni = Some(other.strip_prefix("--sni=").unwrap().to_string());
                 } else if other.starts_with("--jitter=") {
@@ -1314,6 +1391,10 @@ async fn main() {
                         "max_errors" => max_errors = val.parse().ok(),
                         "proxy_file" => proxy_file = Some(val.to_string()),
                         "tor_proxy" => tor_proxy = Some(val.to_string()),
+                        "tor_entry_guards" => tor_entry_guards = Some(val.to_string()),
+                        "tor_bridges" => tor_bridges = Some(val.to_string()),
+                        "tor_circuit_timeout" => tor_circuit_timeout = val.parse().ok(),
+                        "tor_ssthresh" => if let Ok(parsed) = val.parse() { tor_ssthresh = parsed; },
                         "save_proxies" => save_proxies = Some(val.to_string()),
                         "output_csv" | "output" => output_csv = Some(val.to_string()),
                         "custom_selector" => custom_selector = Some(val.to_string()),
@@ -1377,6 +1458,16 @@ async fn main() {
 
         // Probe domain
         let state = Arc::new(Mutex::new(AppState::new()));
+        if mode_str == "tor" || mode_str == "scrape-tor" {
+            if tor_entry_guards.is_some() || tor_bridges.is_some() || tor_circuit_timeout.is_some() {
+                println!("  [verify] Configuring Tor parameters via Control Port ({})...", tor_control);
+                if let Err(e) = configure_tor(&tor_control, tor_entry_guards.as_deref(), tor_bridges.as_deref(), tor_circuit_timeout).await {
+                    eprintln!("  [verify] Warning: Failed to configure Tor via Control Port: {}", e);
+                } else {
+                    println!("  [verify] Tor parameters applied successfully.");
+                }
+            }
+        }
         {
             let mut st = state.lock().await;
             st.target_url = target_url.to_string();
@@ -1485,6 +1576,16 @@ async fn main() {
 
     // Probe domain
     let state = Arc::new(Mutex::new(AppState::new()));
+    if mode_str == "tor" || mode_str == "scrape-tor" {
+        if tor_entry_guards.is_some() || tor_bridges.is_some() || tor_circuit_timeout.is_some() {
+            println!("  Configuring Tor parameters via Control Port ({})...", tor_control);
+            if let Err(e) = configure_tor(&tor_control, tor_entry_guards.as_deref(), tor_bridges.as_deref(), tor_circuit_timeout).await {
+                eprintln!("  Warning: Failed to configure Tor via Control Port: {}", e);
+            } else {
+                println!("  Tor parameters applied successfully.");
+            }
+        }
+    }
     {
         let mut st = state.lock().await;
         st.target_url = target_url.to_string();
@@ -1635,6 +1736,7 @@ async fn main() {
             if auto_tune {
                 let stats_tune = stats.clone();
                 let state_tune = state.clone();
+                let is_tor_mode = mode_str == "tor" || mode_str == "scrape-tor";
                 tokio::spawn(async move {
                     let mut last_errors = 0u64;
                     while stats_tune.running.load(Ordering::Relaxed) {
@@ -1652,7 +1754,8 @@ async fn main() {
                         if new_errors > 5 || p50 > 1500 {
                             target_conc = target_conc.saturating_sub(5).max(5);
                         } else if p50 < 400 {
-                            target_conc = target_conc.saturating_add(2).min(500);
+                            let inc = if is_tor_mode && current_conc >= tor_ssthresh { 1 } else { 2 };
+                            target_conc = target_conc.saturating_add(inc).min(500);
                         }
                         
                         if target_conc != current_conc {
