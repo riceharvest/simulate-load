@@ -861,28 +861,59 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     st.imgs = imgs; st.apis = apis; st.statics = verified_statics;
 }
 
-async fn filter_alive_proxies(proxies: &[String], state: &Arc<Mutex<AppState>>) -> Vec<String> {
+async fn http_proxy_check(proxy_url: &str, target_url: &str, _config: &ClientConfig) -> bool {
+    let proxy = match reqwest::Proxy::all(proxy_url) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let client = match reqwest::Client::builder()
+        .proxy(proxy)
+        .timeout(Duration::from_secs(4))
+        .danger_accept_invalid_certs(true)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    client.get(target_url)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .send()
+        .await
+        .is_ok()
+}
+
+async fn filter_alive_proxies(proxies: &[String], target_url: &str, config: &ClientConfig, state: &Arc<Mutex<AppState>>) -> Vec<String> {
     let to = 3u64;
     let tc = 1000usize;
     let total = proxies.len();
     state.lock().await.tcp_total = total as u32;
-    state.lock().await.status_msg = format!("TCP check {}...", total);
+    state.lock().await.status_msg = format!("TCP checking {}...", total);
     let sem = Arc::new(Semaphore::new(tc));
     let d = Arc::new(AtomicUsize::new(0));
     let s2 = Arc::clone(state);
     let mut h = Vec::with_capacity(total);
+    
+    let target = target_url.to_string();
+    let client_cfg = config.clone();
+
     for p in proxies.to_owned() {
         let sem = sem.clone();
         let dd = d.clone();
         let ss = s2.clone();
+        let target_clone = target.clone();
+        let cfg_clone = client_cfg.clone();
         h.push(tokio::spawn(async move {
             let _permit = sem.acquire_owned().await.unwrap();
-            let alive = tcp_check(&p, to).await;
+            let mut alive = tcp_check(&p, to).await;
+            if alive {
+                // If TCP port is open, verify proxy routing ability via HTTP request to target URL
+                alive = http_proxy_check(&p, &target_clone, &cfg_clone).await;
+            }
             let n = dd.fetch_add(1, Ordering::Relaxed) + 1;
             if n % 500 == 0 || n == total {
                 let mut lock = ss.lock().await;
                 lock.tcp_checked = n as u32;
-                lock.status_msg = format!("TCP: {}/{}", n, total);
+                lock.status_msg = format!("Checked: {}/{}", n, total);
             }
             if alive {
                 Some(p)
@@ -901,6 +932,10 @@ async fn filter_alive_proxies(proxies: &[String], state: &Arc<Mutex<AppState>>) 
 }
 
 async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Vec<String>> {
+    let (config, target_url) = {
+        let st = state.lock().await;
+        (st.client_config.clone(), st.target_url.clone())
+    };
     match mode {
         ProxyMode::Tor => {
             state.lock().await.status_msg = "Checking Tor...".to_string();
@@ -926,10 +961,6 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
         }
         ProxyMode::Scrape | ProxyMode::ScrapeTorFallback => {
             state.lock().await.status_msg = "Scraping proxies...".to_string();
-            let config = {
-                let st = state.lock().await;
-                st.client_config.clone()
-            };
             let c = browser_client_builder(&config).timeout(Duration::from_secs(15)).build().unwrap();
             let scraped = match tokio::time::timeout(Duration::from_secs(30), scrape_all(&c, state)).await {
                 Ok(res) => {
@@ -956,7 +987,7 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
                 shuffled_scraped.shuffle(&mut rng);
                 shuffled_scraped.into_iter().take(3000).collect()
             };
-            let alive = filter_alive_proxies(&sample, state).await;
+            let alive = filter_alive_proxies(&sample, &target_url, &config, state).await;
             state.lock().await.total_alive = alive.len(); state.lock().await.status_msg = format!("TCP alive: {}", alive.len());
             let mut result = alive;
             result.sort(); result.dedup();
@@ -1558,7 +1589,7 @@ async fn main() {
                 None
             } else {
                 println!("  Verifying {} proxies from file...", list.len());
-                let verified = filter_alive_proxies(&list, &state).await;
+                let verified = filter_alive_proxies(&list, &target_url, &config, &state).await;
                 Some(verified)
             }
         } else if let Some(url) = &tor_proxy {
@@ -1679,7 +1710,7 @@ async fn main() {
             None
         } else {
             println!("  Verifying {} proxies from file...", list.len());
-            let verified = filter_alive_proxies(&list, &state).await;
+            let verified = filter_alive_proxies(&list, &target_url, &config, &state).await;
             if verified.is_empty() {
                 eprintln!("  No alive proxies found in file {}", path);
                 None
