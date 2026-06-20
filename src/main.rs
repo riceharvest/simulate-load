@@ -409,21 +409,39 @@ async fn scrape_all(c: &Client, state: &Arc<Mutex<AppState>>) -> Vec<String> {
         (st.max_scrape, st.custom_selector.clone())
     };
     let re = Arc::new(Regex::new(r"(\d{1,3}\.\d{1,3}:\d+)").unwrap());
-    let all = Arc::new(Mutex::new(Vec::new())); let sem = Arc::new(Semaphore::new(10)); let done = Arc::new(AtomicBool::new(false));
-    let ht = HTML_SRC.len() as u32; let rt = RAW_SRC.len() as u32; let total = ht + rt; state.lock().await.scrape_total = total; let mut handles = vec![];
+    let all = Arc::new(Mutex::new(Vec::new()));
+    let sem = Arc::new(Semaphore::new(10));
+    let done = Arc::new(AtomicBool::new(false));
+    let ht = HTML_SRC.len() as u32;
+    let rt = RAW_SRC.len() as u32;
+    let total = ht + rt;
+    state.lock().await.scrape_total = total;
+    let mut handles = vec![];
     let srcs: Vec<(&str, bool)> = HTML_SRC.iter().map(|s| (*s, true)).chain(RAW_SRC.iter().map(|s| (*s, false))).collect();
-    for (idx, (src, html)) in srcs.iter().enumerate() {
-        if done.load(Ordering::Relaxed) { break; }
-        let p = sem.clone().acquire_owned().await.unwrap();
-        if done.load(Ordering::Relaxed) { drop(p); break; }
-        let s2 = state.clone(); let a2 = all.clone(); let r2 = re.clone(); let c2 = c.clone(); let s_ = src.to_string(); let maxed = done.clone(); let h = *html;
+    for (idx, (src, html)) in srcs.into_iter().enumerate() {
+        let s2 = state.clone();
+        let a2 = all.clone();
+        let r2 = re.clone();
+        let c2 = c.clone();
+        let s_ = src.to_string();
+        let maxed = done.clone();
+        let h = html;
         let sel = custom_selector.clone();
+        let sem = sem.clone();
         handles.push(tokio::spawn(async move {
-            { let mut st = s2.lock().await; st.scrape_phase = (idx + 1) as u32; st.status_msg = format!("Scraping {} [{}/{}]...", if h {"HTML"} else {"raw"}, idx + 1, total); }
+            let _permit = sem.acquire_owned().await.unwrap();
+            if maxed.load(Ordering::Relaxed) { return; }
+            {
+                let mut st = s2.lock().await;
+                st.scrape_phase = (idx + 1) as u32;
+                st.status_msg = format!("Scraping {} [{}/{}]...", if h {"HTML"} else {"raw"}, idx + 1, total);
+            }
             let p2 = if h { scrape_html(&c2, &s_, sel.as_deref()).await } else { scrape_raw(&c2, &s_, &r2).await };
-            let mut a = a2.lock().await; a.extend(p2);
-            if a.len() >= max { maxed.store(true, Ordering::Relaxed); }
-            drop(a); drop(p);
+            let mut a = a2.lock().await;
+            a.extend(p2);
+            if a.len() >= max {
+                maxed.store(true, Ordering::Relaxed);
+            }
         }));
     }
     for h in handles { let _ = h.await; }
@@ -840,32 +858,36 @@ async fn filter_alive_proxies(proxies: &[String], state: &Arc<Mutex<AppState>>) 
     state.lock().await.tcp_total = total as u32;
     state.lock().await.status_msg = format!("TCP check {}...", total);
     let sem = Arc::new(Semaphore::new(tc));
-    let a = Arc::new(Mutex::new(Vec::new()));
     let d = Arc::new(AtomicUsize::new(0));
     let s2 = Arc::clone(state);
     let mut h = Vec::with_capacity(total);
     for p in proxies.to_owned() {
-        let permit = Arc::clone(&sem).acquire_owned().await.unwrap();
-        let aa = Arc::clone(&a);
-        let dd = Arc::clone(&d);
-        let ss = Arc::clone(&s2);
+        let sem = sem.clone();
+        let dd = d.clone();
+        let ss = s2.clone();
         h.push(tokio::spawn(async move {
-            if tcp_check(&p, to).await {
-                aa.lock().await.push(p);
-            }
+            let _permit = sem.acquire_owned().await.unwrap();
+            let alive = tcp_check(&p, to).await;
             let n = dd.fetch_add(1, Ordering::Relaxed) + 1;
             if n % 500 == 0 || n == total {
-                ss.lock().await.tcp_checked = n as u32;
-                ss.lock().await.status_msg = format!("TCP: {}/{}", n, total);
+                let mut lock = ss.lock().await;
+                lock.tcp_checked = n as u32;
+                lock.status_msg = format!("TCP: {}/{}", n, total);
             }
-            drop(permit);
+            if alive {
+                Some(p)
+            } else {
+                None
+            }
         }));
     }
+    let mut alive_proxies = Vec::new();
     for x in h {
-        let _ = x.await;
+        if let Ok(Some(p)) = x.await {
+            alive_proxies.push(p);
+        }
     }
-    let alive_result = a.lock().await.clone();
-    alive_result
+    alive_proxies
 }
 
 async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Vec<String>> {
