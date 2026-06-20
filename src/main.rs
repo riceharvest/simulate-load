@@ -455,8 +455,13 @@ async fn scrape_all(c: &Client, state: &Arc<Mutex<AppState>>) -> Vec<String> {
 }
 
 async fn tcp_check(addr: &str, timeout: u64) -> bool {
+    use std::net::SocketAddr;
     let a = addr.trim_start_matches("http://").trim_start_matches("https://").trim_start_matches("socks4://").trim_start_matches("socks5://").trim_start_matches("socks://");
-    tokio::time::timeout(Duration::from_secs(timeout), tokio::net::TcpStream::connect(a)).await.ok().and_then(|r| r.ok()).is_some()
+    if let Ok(socket_addr) = a.parse::<SocketAddr>() {
+        tokio::time::timeout(Duration::from_secs(timeout), tokio::net::TcpStream::connect(socket_addr)).await.ok().and_then(|r| r.ok()).is_some()
+    } else {
+        tokio::time::timeout(Duration::from_secs(timeout), tokio::net::TcpStream::connect(a)).await.ok().and_then(|r| r.ok()).is_some()
+    }
 }
 
 fn parse_templates(body: &str) -> String {
