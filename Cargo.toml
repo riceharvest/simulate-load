@@ -6,7 +6,8 @@ edition = "2021"
 [dependencies]
 reqwest = { version = "0.12", features = ["default", "socks", "json", "stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["time"] }
+bytes = "1"
 url = "2.5"
 scraper = "0.22"
 regex = "1"
