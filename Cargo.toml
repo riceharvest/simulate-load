@@ -13,6 +13,7 @@ scraper = "0.22"
 regex = "1"
 rand = { version = "0.10", features = ["std_rng"] }
 
-[[bin]]
-name = "check_proxy"
-path = "scratch/check_proxy.rs"
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"

