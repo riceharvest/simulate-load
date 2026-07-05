@@ -3683,4 +3683,50 @@ mod tests {
         assert!(parts[1].parse::<u64>().is_ok());
         assert!(parts[2].parse::<u32>().is_ok());
     }
+
+    #[test]
+    fn random_ip_matches_regex() {
+        let re = Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$").unwrap();
+        for _ in 0..100 {
+            assert!(re.is_match(&random_ip()));
+        }
+    }
+
+    #[test]
+    fn random_ip_octets_in_range() {
+        for _ in 0..100 {
+            let ip = random_ip();
+            let octets: Vec<u8> = ip.split('.').map(|s| s.parse().unwrap()).collect();
+            assert_eq!(octets.len(), 4);
+            assert!((1..=254).contains(&octets[0]));
+            assert!((0..=254).contains(&octets[1]));
+            assert!((0..=254).contains(&octets[2]));
+            assert!((1..=254).contains(&octets[3]));
+        }
+    }
+
+    #[test]
+    fn random_ip_first_and_last_octets_never_zero() {
+        for _ in 0..1000 {
+            let ip = random_ip();
+            let mut parts = ip.split('.');
+            let first: u8 = parts.next().unwrap().parse().unwrap();
+            let last: u8 = parts.next_back().unwrap().parse().unwrap();
+            assert_ne!(first, 0);
+            assert_ne!(last, 0);
+        }
+    }
+
+    #[test]
+    fn random_ip_generates_distinct_values() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            seen.insert(random_ip());
+        }
+        assert!(
+            seen.len() >= 2,
+            "random_ip produced only {} distinct values",
+            seen.len()
+        );
+    }
 }
