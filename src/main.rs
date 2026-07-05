@@ -1905,30 +1905,48 @@ fn write_results_csv(path: &str, params: ResultsCsvParams<'_>) {
 }
 
 /// Resolve a Tor control address to a connection target.
-/// Tries Unix socket paths first (standard on modern Tor), then falls back to TCP.
+/// Unix socket paths are returned as `(path, "unix")`. TCP addresses are parsed
+/// into `(host, port)`; if the port is omitted, the default Tor control port
+/// `9051` is used. A bare numeric value is treated as a port on `127.0.0.1`.
 fn resolve_control_addr(addr: &str) -> Result<(String, String), String> {
-    // If addr is already TCP (host:port), use it directly
-    if addr.contains(':') && !addr.starts_with('/') {
-        return Ok((addr.to_string(), "tcp".to_string()));
+    if addr.is_empty() {
+        return Err("control address is empty".to_string());
     }
-    // If addr starts with '/', treat as Unix socket path
+    // Unix socket path
     if addr.starts_with('/') {
         return Ok((addr.to_string(), "unix".to_string()));
     }
-    // Otherwise try common Unix socket paths, then TCP
-    let unix_paths = [
-        "/run/tor/control",
-        "/var/run/tor/control",
-        "/tmp/tor/control",
-        "/home/tor/.local/share/tor/control_socket",
-    ];
-    for p in &unix_paths {
-        if std::fs::metadata(p).is_ok() {
-            return Ok((p.to_string(), "unix".to_string()));
+    // IPv6 bracketed form [host]:port
+    if addr.starts_with('[') {
+        let Some((host, port)) = addr.rsplit_once(':') else {
+            return Err("IPv6 control address is missing port".to_string());
+        };
+        let host = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .ok_or_else(|| "invalid IPv6 bracketed control address".to_string())?;
+        let port = port
+            .parse::<u16>()
+            .map_err(|e| format!("invalid control port: {}", e))?;
+        return Ok((host.to_string(), port.to_string()));
+    }
+    // IPv4 or hostname with optional port
+    match addr.rsplit_once(':') {
+        Some((host, port)) => {
+            let port = port
+                .parse::<u16>()
+                .map_err(|e| format!("invalid control port: {}", e))?;
+            Ok((host.to_string(), port.to_string()))
+        }
+        None => {
+            // A bare number is treated as a port on localhost for compatibility.
+            if let Ok(port) = addr.parse::<u16>() {
+                Ok(("127.0.0.1".to_string(), port.to_string()))
+            } else {
+                Ok((addr.to_string(), "9051".to_string()))
+            }
         }
     }
-    // Fall back to TCP
-    Ok((format!("127.0.0.1:{}", addr.parse::<u16>().unwrap_or(9051)), "tcp".to_string()))
 }
 
 /// Read the Tor control cookie file for cookie authentication.
@@ -2008,8 +2026,9 @@ async fn tor_control_command(
         send_and_read(&mut stream, b"QUIT\r\n", 2).await?;
         Ok(response)
     } else {
-        let mut stream = tokio::net::TcpStream::connect(&conn_target).await?;
-        let cookie = read_control_cookie(&conn_target);
+        let tcp_addr = format!("{}:{}", conn_target, conn_type);
+        let mut stream = tokio::net::TcpStream::connect(&tcp_addr).await?;
+        let cookie = read_control_cookie(&tcp_addr);
         let auth_result = if let Some(ref cookie_hex) = cookie {
             send_and_read(&mut stream, format!("AUTHENTICATE \"{}\"\r\n", cookie_hex).as_bytes(), 5).await?
         } else {
@@ -2968,7 +2987,9 @@ async fn main() {
                             if typ == "unix" {
                                 tokio::net::UnixStream::connect(addr).await.is_ok()
                             } else {
-                                tokio::net::TcpStream::connect(addr).await.is_ok()
+                                tokio::net::TcpStream::connect(format!("{}:{}", addr, typ))
+                                    .await
+                                    .is_ok()
                             }
                         }
                         Err(_) => false,
@@ -3791,5 +3812,37 @@ mod tests {
         assert!(headers.get("X-Real-IP").is_none());
         assert!(headers.get("CF-Connecting-IP").is_none());
         assert!(headers.get("True-Client-IP").is_none());
+    }
+
+    #[test]
+    fn resolve_control_addr_ipv4_with_port() {
+        let (host, port) = resolve_control_addr("127.0.0.1:9051").expect("should parse IPv4");
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, "9051");
+    }
+
+    #[test]
+    fn resolve_control_addr_ipv6_with_port() {
+        let (host, port) = resolve_control_addr("[::1]:9051").expect("should parse IPv6");
+        assert_eq!(host, "::1");
+        assert_eq!(port, "9051");
+    }
+
+    #[test]
+    fn resolve_control_addr_default_port() {
+        let (host, port) = resolve_control_addr("127.0.0.1").expect("should default port");
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, "9051");
+    }
+
+    #[test]
+    fn resolve_control_addr_empty_errors() {
+        assert!(resolve_control_addr("").is_err());
+    }
+
+    #[test]
+    fn resolve_control_addr_malformed_errors() {
+        assert!(resolve_control_addr("127.0.0.1:abc").is_err());
+        assert!(resolve_control_addr("[::1:9051").is_err());
     }
 }
