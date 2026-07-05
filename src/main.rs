@@ -1114,10 +1114,50 @@ fn url_join(base: &str, href: &str) -> String {
     format!("{}/{}", base, href.trim_start_matches('/'))
 }
 
+async fn send_with_retry_for_probe(
+    builder: RequestBuilder,
+    max_retries: usize,
+    name: &str,
+) -> Result<reqwest::Response, FetchError> {
+    let mut last_err: Option<FetchError> = None;
+    for attempt in 0..=max_retries {
+        let cloned = clone_request_builder_with_retry(&builder, name).await?;
+        match cloned.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_server_error() && attempt < max_retries {
+                    last_err = Some(FetchError::from(std::io::Error::other(format!(
+                        "{name}: server error {status}"
+                    ))));
+                    let backoff = Duration::from_millis(500 * (1u64 << attempt)).min(Duration::from_secs(8));
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                return Ok(resp);
+            }
+            Err(e) => {
+                if (e.is_timeout() || e.is_connect()) && attempt < max_retries {
+                    last_err = Some(FetchError::from(e));
+                    let backoff = Duration::from_millis(500 * (1u64 << attempt)).min(Duration::from_secs(8));
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                return Err(FetchError::from(e));
+            }
+        }
+    }
+    Err(match last_err {
+        Some(err) => err,
+        None => FetchError::from(std::io::Error::other(format!(
+            "{name}: all retries exhausted"
+        ))),
+    })
+}
+
 async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) -> Result<(), reqwest::Error> {
-    let (config, tor_proxy_opt, mode) = {
+    let (config, tor_proxy_opt, mode, max_retries) = {
         let st = state.lock().await;
-        (st.client_config.clone(), st.tor_proxy.clone(), st.mode)
+        (st.client_config.clone(), st.tor_proxy.clone(), st.mode, st.max_retries)
     };
     let effective_tor_proxy = if let Some(ref p) = tor_proxy_opt {
         Some(p.clone())
@@ -1259,7 +1299,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) -> Result<
             let mut is_img = false;
             let mut is_img_opt = false;
             let mut is_ok = false;
-            if let Ok(r) = browser_request(c_clone.get(&path_clone), false).send().await {
+            if let Ok(r) = send_with_retry_for_probe(browser_request(c_clone.get(&path_clone), false), max_retries, "probe_static").await {
                 if r.status().as_u16() < 400 {
                     let sz = r.bytes().await.map(|b| b.len()).unwrap_or(0);
                     if sz > 0 {
@@ -1268,7 +1308,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) -> Result<
                         if lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".png") || lower.contains(".webp") || lower.contains(".gif") || lower.contains(".svg") {
                             is_img = true;
                             if vercel_clone {
-                                if let Ok(r2) = browser_request(c_clone.get(format!("{}?width=300", path_clone)), false).send().await {
+                                if let Ok(r2) = send_with_retry_for_probe(browser_request(c_clone.get(format!("{}?width=300", path_clone)), false), max_retries, "probe_imgopt").await {
                                     let sz2 = r2.bytes().await.map(|b| b.len()).unwrap_or(0);
                                     if sz2 > 0 && sz2 != sz {
                                         is_img_opt = true;
@@ -1303,7 +1343,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) -> Result<
         let c_clone = c.clone();
         let url = format!("{}{}", base, path);
         api_handles.push(tokio::spawn(async move {
-            if let Ok(r) = browser_request(c_clone.get(&url), false).send().await {
+            if let Ok(r) = send_with_retry_for_probe(browser_request(c_clone.get(&url), false), max_retries, "probe_api").await {
                 if r.status().as_u16() < 400 {
                     return Some(path.to_string());
                 }
@@ -2809,17 +2849,24 @@ async fn main() {
     // Canary: run a single probe request before the actual load test
     if canary {
         println!("  Running canary health check...");
-        let canary_client = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
-            .build() {
+        let (max_retries, canary_timeout, canary_config) = {
+            let st = state.lock().await;
+            (st.max_retries, st.client_config.timeout, st.client_config.clone())
+        };
+        let mut canary_builder = browser_client_builder(&canary_config)
+            .timeout(canary_timeout)
+            .redirect(reqwest::redirect::Policy::none());
+        if canary_config.insecure {
+            canary_builder = canary_builder.danger_accept_invalid_certs(true);
+        }
+        let canary_client = match canary_builder.build() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("  WARNING: Failed to build canary client: {}", e);
                 reqwest::Client::new()
             }
         };
-        match canary_client.get(&target_url).send().await {
+        match send_with_retry_for_probe(browser_request(canary_client.get(&target_url), false), max_retries, "canary").await {
             Ok(resp) => {
                 let status = resp.status();
                 let body_len = resp.content_length().unwrap_or(0);
@@ -2829,7 +2876,7 @@ async fn main() {
                 }
             }
             Err(e) => {
-                eprintln!("  WARNING: Canary failed: {}", e);
+                eprintln!("  WARNING: Canary failed after retries: {}", e);
             }
         }
         println!("  Canary complete. Starting load test...");
