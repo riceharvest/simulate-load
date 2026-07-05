@@ -1386,16 +1386,22 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) -> Result<
     if !html.is_empty() {
         let doc = Html::parse_document(&html);
         for sel in & [("link[href]", "href"), ("script[src]", "src"), ("img[src]", "src")] {
-            let s = Selector::parse(sel.0).unwrap_or_else(|e| {
-                eprintln!("  Failed to parse selector '{}': {}", sel.0, e);
-                std::process::exit(1);
-            });
+            let s = match Selector::parse(sel.0) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("  Failed to parse selector '{}': {}", sel.0, e);
+                    continue;
+                }
+            };
             for el in doc.select(&s) { if let Some(v) = el.value().attr(sel.1) { let j = url_join(base, v); if !j.is_empty() { statics.push(j); } } }
         }
-        let src_sel = Selector::parse("source[srcset]").unwrap_or_else(|e| {
-            eprintln!("  Failed to parse selector 'source[srcset]': {}", e);
-            std::process::exit(1);
-        });
+        let src_sel = match Selector::parse("source[srcset]") {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  Failed to parse selector 'source[srcset]': {}", e);
+                return Ok(());
+            }
+        };
         for el in doc.select(&src_sel) {
             if let Some(srcset) = el.value().attr("srcset") {
                 let first = srcset.split(',').next().unwrap_or("").split_whitespace().next().unwrap_or("");
