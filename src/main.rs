@@ -221,7 +221,6 @@ fn print_help() {
     println!("  {} https://target.com tor normal 50 60 2>&1", env!("CARGO_PKG_NAME"));
 }
 
-#[allow(clippy::expect_used)]
 fn add_session_cookie(mut builder: RequestBuilder, proxy_idx: usize, sessions: &[std::sync::Mutex<String>]) -> RequestBuilder {
     if proxy_idx < sessions.len() {
         let cookie = match sessions[proxy_idx].lock() {
@@ -236,7 +235,6 @@ fn add_session_cookie(mut builder: RequestBuilder, proxy_idx: usize, sessions: &
     builder
 }
 
-#[allow(clippy::expect_used)]
 fn add_session_and_extra_cookie(mut builder: RequestBuilder, proxy_idx: usize, sessions: &[std::sync::Mutex<String>], extra_cookie: &str) -> RequestBuilder {
     if proxy_idx < sessions.len() {
         let stored = match sessions[proxy_idx].lock() {
@@ -265,7 +263,6 @@ fn extract_set_cookie(headers: &HeaderMap) -> Option<String> {
     if cookies.is_empty() { None } else { Some(cookies.join("; ")) }
 }
 
-#[allow(clippy::expect_used)]
 fn update_session_from_headers(proxy_idx: usize, sessions: &[std::sync::Mutex<String>], headers: &HeaderMap) {
     if proxy_idx < sessions.len() {
         if let Some(cookie) = extract_set_cookie(headers) {
@@ -1493,7 +1490,6 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     st.imgs = imgs; st.apis = apis; st.statics = verified_statics;
 }
 
-#[allow(clippy::expect_used)]
 async fn http_proxy_check(proxy_url: &str, target_url: &str, _config: &ClientConfig) -> bool {
     let proxy = match reqwest::Proxy::all(proxy_url) {
         Ok(p) => p,
