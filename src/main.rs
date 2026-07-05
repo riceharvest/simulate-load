@@ -16,6 +16,10 @@ use url::Url;
 
 type FetchError = Box<dyn std::error::Error + Send + Sync>;
 
+fn fetch_error_all_attempts_exhausted(name: &str) -> FetchError {
+    FetchError::from(std::io::Error::other(format!("{name}: all attempts exhausted")))
+}
+
 const DEFAULT_TARGET_URL: &str = "https://livdevries.com";
 
 static SPOOF_IP: AtomicBool = AtomicBool::new(false);
@@ -779,7 +783,7 @@ async fn fetch_page(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
     }
     match last_err {
         Some(e) => Err(FetchError::from(e)),
-        None => unreachable!("fetch_page: all attempts exhausted"),
+        None => Err(fetch_error_all_attempts_exhausted("fetch_page")),
     }
 }
 
@@ -832,7 +836,7 @@ async fn fetch_page_with_referrer(
     }
     match last_err {
         Some(e) => Err(FetchError::from(e)),
-        None => unreachable!("fetch_page_with_referrer: all attempts exhausted"),
+        None => Err(fetch_error_all_attempts_exhausted("fetch_page_with_referrer")),
     }
 }
 
@@ -876,7 +880,7 @@ async fn fetch_range(c: Client, url: String, delay: u64, proxy_idx: usize, sessi
     }
     match last_err {
         Some(e) => Err(FetchError::from(e)),
-        None => unreachable!("fetch_range: all attempts exhausted"),
+        None => Err(fetch_error_all_attempts_exhausted("fetch_range")),
     }
 }
 
@@ -924,7 +928,7 @@ async fn fetch_slow(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
     }
     match last_err {
         Some(e) => Err(FetchError::from(e)),
-        None => unreachable!("fetch_slow: all attempts exhausted"),
+        None => Err(fetch_error_all_attempts_exhausted("fetch_slow")),
     }
 }
 
@@ -970,7 +974,7 @@ async fn fetch_post(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
     }
     match last_err {
         Some(e) => Err(FetchError::from(e)),
-        None => unreachable!("fetch_post: all attempts exhausted"),
+        None => Err(fetch_error_all_attempts_exhausted("fetch_post")),
     }
 }
 
@@ -1015,7 +1019,7 @@ async fn fetch_cookie(c: Client, url: String, delay: u64, proxy_idx: usize, sess
     }
     match last_err {
         Some(e) => Err(FetchError::from(e)),
-        None => unreachable!("fetch_cookie: all attempts exhausted"),
+        None => Err(fetch_error_all_attempts_exhausted("fetch_cookie")),
     }
 }
 
@@ -1066,7 +1070,7 @@ async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, s
     }
     match last_err {
         Some(e) => Err(FetchError::from(e)),
-        None => unreachable!("fetch_slowloris: all attempts exhausted"),
+        None => Err(fetch_error_all_attempts_exhausted("fetch_slowloris")),
     }
 }
 
@@ -1117,7 +1121,7 @@ async fn fetch_bandwidth(c: Client, url: String, delay: u64, proxy_idx: usize, s
     }
     match last_err {
         Some(e) => Err(FetchError::from(e)),
-        None => unreachable!("fetch_bandwidth: all attempts exhausted"),
+        None => Err(fetch_error_all_attempts_exhausted("fetch_bandwidth")),
     }
 }
 
@@ -3358,7 +3362,18 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{AttackMode, ProxyMode};
+    use super::*;
+
+    #[test]
+    fn fetch_error_all_attempts_exhausted_message() {
+        let err = fetch_error_all_attempts_exhausted("fetch_page");
+        assert!(
+            err.to_string().contains("fetch_page: all attempts exhausted"),
+            "unexpected error: {}",
+            err
+        );
+        assert!(err.downcast_ref::<std::io::Error>().is_some());
+    }
 
     fn rate_limit_delay_ms(rate: Option<u64>) -> u64 {
         match rate {
