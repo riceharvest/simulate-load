@@ -3729,4 +3729,67 @@ mod tests {
             seen.len()
         );
     }
+
+    #[test]
+    fn browser_request_false_has_user_agent_and_accept() {
+        SPOOF_IP.store(false, Ordering::Relaxed);
+        let client = Client::new();
+        let builder = client.get("http://example.com");
+        let request = browser_request(builder, false)
+            .build()
+            .expect("request should build");
+        let headers = request.headers();
+        assert!(headers.get("User-Agent").is_some(), "User-Agent header missing");
+        assert!(headers.get("Accept").is_some(), "Accept header missing");
+    }
+
+    #[test]
+    fn browser_request_true_adds_spoof_headers() {
+        let client = Client::new();
+        let builder = client.get("http://example.com");
+        let request = browser_request(builder, true)
+            .build()
+            .expect("request should build");
+        let headers = request.headers();
+        let xff = headers.get("X-Forwarded-For").expect("X-Forwarded-For missing");
+        let xri = headers.get("X-Real-IP").expect("X-Real-IP missing");
+        let cf = headers.get("CF-Connecting-IP").expect("CF-Connecting-IP missing");
+        let tci = headers.get("True-Client-IP").expect("True-Client-IP missing");
+        assert_eq!(xff.to_str().unwrap(), xri.to_str().unwrap());
+        assert_eq!(xff.to_str().unwrap(), cf.to_str().unwrap());
+        assert_eq!(xff.to_str().unwrap(), tci.to_str().unwrap());
+    }
+
+    #[test]
+    fn browser_request_spoof_ip_looks_like_ipv4() {
+        let client = Client::new();
+        let builder = client.get("http://example.com");
+        let request = browser_request(builder, true)
+            .build()
+            .expect("request should build");
+        let headers = request.headers();
+        let ip = headers
+            .get("X-Forwarded-For")
+            .expect("X-Forwarded-For missing")
+            .to_str()
+            .unwrap();
+        assert!(!ip.is_empty(), "spoof IP should be non-empty");
+        let re = Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$").unwrap();
+        assert!(re.is_match(ip), "IP does not look like IPv4: {}", ip);
+    }
+
+    #[test]
+    fn browser_request_false_no_spoof_headers() {
+        SPOOF_IP.store(false, Ordering::Relaxed);
+        let client = Client::new();
+        let builder = client.get("http://example.com");
+        let request = browser_request(builder, false)
+            .build()
+            .expect("request should build");
+        let headers = request.headers();
+        assert!(headers.get("X-Forwarded-For").is_none());
+        assert!(headers.get("X-Real-IP").is_none());
+        assert!(headers.get("CF-Connecting-IP").is_none());
+        assert!(headers.get("True-Client-IP").is_none());
+    }
 }
