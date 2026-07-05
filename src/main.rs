@@ -1259,8 +1259,6 @@ fn url_join(base: &str, href: &str) -> String {
     if href.starts_with('/') { format!("{}{}", base, href.trim_start_matches('/')) } else { format!("{}{}", base, href) }
 }
 
-#[allow(clippy::expect_used)]
-#[allow(clippy::unwrap_used)]
 async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     let (config, tor_proxy_opt, mode) = {
         let st = state.lock().await;
