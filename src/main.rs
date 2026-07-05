@@ -3304,6 +3304,28 @@ mod tests {
     }
 
     #[test]
+    fn attack_mode_variants_full() {
+        assert_eq!(AttackMode::from_str("largepost"), AttackMode::LargePost);
+        assert_eq!(AttackMode::from_str("LargePost"), AttackMode::LargePost);
+        assert_eq!(AttackMode::from_str("assetspray"), AttackMode::AssetSpray);
+        assert_eq!(AttackMode::from_str("AssetSpray"), AttackMode::AssetSpray);
+        assert_eq!(AttackMode::from_str("rangereq"), AttackMode::RangeReq);
+        assert_eq!(AttackMode::from_str("RangeReq"), AttackMode::RangeReq);
+        assert_eq!(AttackMode::from_str("cookiebomb"), AttackMode::CookieBomb);
+        assert_eq!(AttackMode::from_str("CookieBomb"), AttackMode::CookieBomb);
+        assert_eq!(AttackMode::from_str("ssr"), AttackMode::Ssr);
+        assert_eq!(AttackMode::from_str("SSR"), AttackMode::Ssr);
+        assert_eq!(AttackMode::from_str("middleware"), AttackMode::Middleware);
+        assert_eq!(AttackMode::from_str("Middleware"), AttackMode::Middleware);
+        assert_eq!(AttackMode::from_str("requestflood"), AttackMode::RequestFlood);
+        assert_eq!(AttackMode::from_str("RequestFlood"), AttackMode::RequestFlood);
+        assert_eq!(AttackMode::from_str("notfound"), AttackMode::NotFound);
+        assert_eq!(AttackMode::from_str("NotFound"), AttackMode::NotFound);
+        assert_eq!(AttackMode::from_str("slowloris"), AttackMode::Slowloris);
+        assert_eq!(AttackMode::from_str("SlowLoris"), AttackMode::Slowloris);
+    }
+
+    #[test]
     fn proxy_mode_case_insensitive() {
         assert_eq!(ProxyMode::from_str("tor"), ProxyMode::Tor);
         assert_eq!(ProxyMode::from_str("TOR"), ProxyMode::Tor);
