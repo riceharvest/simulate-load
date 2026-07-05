@@ -767,7 +767,7 @@ fn parse_templates(body: &str) -> String {
             rand::random::<u16>(),
             rand::random::<u16>() & 0x0fff,
             rand::random::<u16>() & 0x3fff | 0x8000,
-            rand::random::<u64>()
+            rand::random::<u64>() >> 16
         );
         result = result.replace("{{random_uuid}}", &uuid);
     }
@@ -3621,5 +3621,66 @@ mod tests {
         update_session_from_headers(5, &sessions, &headers);
         let updated = sessions[0].lock().unwrap().clone();
         assert_eq!(updated, "old=value");
+    }
+
+    #[test]
+    fn parse_templates_replaces_all_placeholders() {
+        let body = "uuid={{random_uuid}}&ts={{timestamp}}&num={{random_int}}";
+        let result = parse_templates(body);
+        assert!(
+            !result.contains("{{random_uuid}}"),
+            "random_uuid placeholder not replaced: {}",
+            result
+        );
+        assert!(
+            !result.contains("{{timestamp}}"),
+            "timestamp placeholder not replaced: {}",
+            result
+        );
+        assert!(
+            !result.contains("{{random_int}}"),
+            "random_int placeholder not replaced: {}",
+            result
+        );
+
+        let re = Regex::new(
+            r"^uuid=[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}&ts=\d+&num=\d+$",
+        )
+        .unwrap();
+        assert!(
+            re.is_match(&result),
+            "result does not match expected format: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn parse_templates_leaves_body_without_templates_unchanged() {
+        let body = "no templates here";
+        assert_eq!(parse_templates(body), body);
+    }
+
+    #[test]
+    fn parse_templates_replaces_multiple_occurrences() {
+        let body = "{{random_uuid}} {{random_uuid}}";
+        let result = parse_templates(body);
+        assert!(!result.contains("{{random_uuid}}"));
+        let parts: Vec<&str> = result.split_whitespace().collect();
+        assert_eq!(parts.len(), 2);
+        let re = Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap();
+        for part in parts {
+            assert!(re.is_match(part), "invalid UUID: {}", part);
+        }
+    }
+
+    #[test]
+    fn parse_templates_values_differ_from_placeholders() {
+        let result = parse_templates("{{random_uuid}} {{timestamp}} {{random_int}}");
+        assert_ne!(result, "{{random_uuid}} {{timestamp}} {{random_int}}");
+        let parts: Vec<&str> = result.split_whitespace().collect();
+        assert_eq!(parts.len(), 3);
+        assert_ne!(parts[0], "{{random_uuid}}");
+        assert!(parts[1].parse::<u64>().is_ok());
+        assert!(parts[2].parse::<u32>().is_ok());
     }
 }
