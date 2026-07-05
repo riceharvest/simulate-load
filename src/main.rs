@@ -14,6 +14,8 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::signal;
 use url::Url;
 
+type FetchError = Box<dyn std::error::Error + Send + Sync>;
+
 const DEFAULT_TARGET_URL: &str = "https://livdevries.com";
 
 static SPOOF_IP: AtomicBool = AtomicBool::new(false);
@@ -740,7 +742,7 @@ fn parse_templates(body: &str) -> String {
     result
 }
 
-async fn fetch_page(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_page(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_page: GET {}", url);
@@ -763,13 +765,20 @@ async fn fetch_page(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
                     last_err = Some(e);
                 }
             }
-        } else if attempt < 2 {
-            // try_clone() failed (extremely rare) — back off and retry
-            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        } else {
+            eprintln!("[WARN] fetch_page: builder.try_clone() returned None (attempt {})", attempt);
+            if attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                continue;
+            } else {
+                return Err(FetchError::from(std::io::Error::other(
+                    "fetch_page: builder.try_clone() returned None on final retry",
+                )));
+            }
         }
     }
     match last_err {
-        Some(e) => Err(e),
+        Some(e) => Err(FetchError::from(e)),
         None => unreachable!("fetch_page: all attempts exhausted"),
     }
 }
@@ -782,7 +791,7 @@ async fn fetch_page_with_referrer(
     proxy_idx: usize,
     sessions: Arc<Vec<std::sync::Mutex<String>>>,
     verbose: bool,
-) -> Result<(usize, u16), reqwest::Error> {
+) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_page_with_referrer: GET {} (referrer: {:?}) (proxy #{})", url, referrer, proxy_idx);
@@ -809,17 +818,25 @@ async fn fetch_page_with_referrer(
                     last_err = Some(e);
                 }
             }
-        } else if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        } else {
+            eprintln!("[WARN] fetch_page_with_referrer: builder.try_clone() returned None (attempt {})", attempt);
+            if attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                continue;
+            } else {
+                return Err(FetchError::from(std::io::Error::other(
+                    "fetch_page_with_referrer: builder.try_clone() returned None on final retry",
+                )));
+            }
         }
     }
     match last_err {
-        Some(e) => Err(e),
+        Some(e) => Err(FetchError::from(e)),
         None => unreachable!("fetch_page_with_referrer: all attempts exhausted"),
     }
 }
 
-async fn fetch_range(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_range(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let end = 100 + (rand::rng().random_range(0..9000));
     if verbose {
@@ -845,17 +862,25 @@ async fn fetch_range(c: Client, url: String, delay: u64, proxy_idx: usize, sessi
                     last_err = Some(e);
                 }
             }
-        } else if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        } else {
+            eprintln!("[WARN] fetch_range: builder.try_clone() returned None (attempt {})", attempt);
+            if attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                continue;
+            } else {
+                return Err(FetchError::from(std::io::Error::other(
+                    "fetch_range: builder.try_clone() returned None on final retry",
+                )));
+            }
         }
     }
     match last_err {
-        Some(e) => Err(e),
+        Some(e) => Err(FetchError::from(e)),
         None => unreachable!("fetch_range: all attempts exhausted"),
     }
 }
 
-async fn fetch_slow(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_slow(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_slow: GET {} (proxy #{}), streaming", url, proxy_idx);
@@ -885,17 +910,25 @@ async fn fetch_slow(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
                     last_err = Some(e);
                 }
             }
-        } else if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        } else {
+            eprintln!("[WARN] fetch_slow: builder.try_clone() returned None (attempt {})", attempt);
+            if attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                continue;
+            } else {
+                return Err(FetchError::from(std::io::Error::other(
+                    "fetch_slow: builder.try_clone() returned None on final retry",
+                )));
+            }
         }
     }
     match last_err {
-        Some(e) => Err(e),
+        Some(e) => Err(FetchError::from(e)),
         None => unreachable!("fetch_slow: all attempts exhausted"),
     }
 }
 
-async fn fetch_post(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_post(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_post: POST {} (proxy #{})", url, proxy_idx);
@@ -923,17 +956,25 @@ async fn fetch_post(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
                     last_err = Some(e);
                 }
             }
-        } else if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        } else {
+            eprintln!("[WARN] fetch_post: builder.try_clone() returned None (attempt {})", attempt);
+            if attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                continue;
+            } else {
+                return Err(FetchError::from(std::io::Error::other(
+                    "fetch_post: builder.try_clone() returned None on final retry",
+                )));
+            }
         }
     }
     match last_err {
-        Some(e) => Err(e),
+        Some(e) => Err(FetchError::from(e)),
         None => unreachable!("fetch_post: all attempts exhausted"),
     }
 }
 
-async fn fetch_cookie(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_cookie(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_cookie: GET {} with cookie bomb (8KB payload) (proxy #{})", url, proxy_idx);
@@ -960,17 +1001,25 @@ async fn fetch_cookie(c: Client, url: String, delay: u64, proxy_idx: usize, sess
                     last_err = Some(e);
                 }
             }
-        } else if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        } else {
+            eprintln!("[WARN] fetch_cookie: builder.try_clone() returned None (attempt {})", attempt);
+            if attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                continue;
+            } else {
+                return Err(FetchError::from(std::io::Error::other(
+                    "fetch_cookie: builder.try_clone() returned None on final retry",
+                )));
+            }
         }
     }
     match last_err {
-        Some(e) => Err(e),
+        Some(e) => Err(FetchError::from(e)),
         None => unreachable!("fetch_cookie: all attempts exhausted"),
     }
 }
 
-async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_slowloris: POST {} slowloris attack (proxy #{})", url, proxy_idx);
@@ -1003,12 +1052,20 @@ async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, s
                     last_err = Some(e);
                 }
             }
-        } else if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        } else {
+            eprintln!("[WARN] fetch_slowloris: builder.try_clone() returned None (attempt {})", attempt);
+            if attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                continue;
+            } else {
+                return Err(FetchError::from(std::io::Error::other(
+                    "fetch_slowloris: builder.try_clone() returned None on final retry",
+                )));
+            }
         }
     }
     match last_err {
-        Some(e) => Err(e),
+        Some(e) => Err(FetchError::from(e)),
         None => unreachable!("fetch_slowloris: all attempts exhausted"),
     }
 }
@@ -1016,7 +1073,7 @@ async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, s
 /// Bandwidth mode: request a large range from the server to actually
 /// consume downstream bandwidth. Uses a `Range: bytes=0-99999999` header
 /// to ask for a large chunk; many servers return 206 Partial Content.
-async fn fetch_bandwidth(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_bandwidth(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_bandwidth: GET {} with Range header (proxy #{})", url, proxy_idx);
@@ -1046,12 +1103,20 @@ async fn fetch_bandwidth(c: Client, url: String, delay: u64, proxy_idx: usize, s
                     }
                 }
             }
-        } else if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        } else {
+            eprintln!("[WARN] fetch_bandwidth: builder.try_clone() returned None (attempt {})", attempt);
+            if attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                continue;
+            } else {
+                return Err(FetchError::from(std::io::Error::other(
+                    "fetch_bandwidth: builder.try_clone() returned None on final retry",
+                )));
+            }
         }
     }
     match last_err {
-        Some(e) => Err(e),
+        Some(e) => Err(FetchError::from(e)),
         None => unreachable!("fetch_bandwidth: all attempts exhausted"),
     }
 }
@@ -1808,9 +1873,9 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                             }
                         }
                         Err(err) => {
-                            if err.is_timeout() {
+                            if err.downcast_ref::<reqwest::Error>().is_some_and(|e| e.is_timeout()) {
                                 stats_clone.error_timeout.fetch_add(1, Ordering::Relaxed);
-                            } else if err.is_connect() {
+                            } else if err.downcast_ref::<reqwest::Error>().is_some_and(|e| e.is_connect()) {
                                 stats_clone.error_connect.fetch_add(1, Ordering::Relaxed);
                             } else {
                                 stats_clone.error_other.fetch_add(1, Ordering::Relaxed);
