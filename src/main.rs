@@ -3282,3 +3282,34 @@ async fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AttackMode, ProxyMode};
+
+    #[test]
+    fn attack_mode_case_insensitive() {
+        assert_eq!(AttackMode::from_str("normal"), AttackMode::Normal);
+        assert_eq!(AttackMode::from_str("NORMAL"), AttackMode::Normal);
+        assert_eq!(AttackMode::from_str("Bandwidth"), AttackMode::Bandwidth);
+        assert_eq!(AttackMode::from_str("BANDWIDTH"), AttackMode::Bandwidth);
+        assert_eq!(AttackMode::from_str("slowread"), AttackMode::SlowRead);
+        assert_eq!(AttackMode::from_str("SlowRead"), AttackMode::SlowRead);
+        assert_eq!(AttackMode::from_str("imageopt"), AttackMode::ImageOpt);
+        assert_eq!(AttackMode::from_str("ImageOpt"), AttackMode::ImageOpt);
+        assert_eq!(AttackMode::from_str("bypasscache"), AttackMode::Normal);
+        assert_eq!(AttackMode::from_str("BypassCache"), AttackMode::Normal);
+        assert_eq!(AttackMode::from_str("cachebust"), AttackMode::Normal);
+        assert_eq!(AttackMode::from_str("CacheBust"), AttackMode::Normal);
+    }
+
+    #[test]
+    fn proxy_mode_case_insensitive() {
+        assert_eq!(ProxyMode::from_str("tor"), ProxyMode::Tor);
+        assert_eq!(ProxyMode::from_str("TOR"), ProxyMode::Tor);
+        assert_eq!(ProxyMode::from_str("Tor"), ProxyMode::Tor);
+        assert_eq!(ProxyMode::from_str("scrape-tor"), ProxyMode::ScrapeTorFallback);
+        assert_eq!(ProxyMode::from_str("SCRAPE-TOR"), ProxyMode::ScrapeTorFallback);
+        assert_eq!(ProxyMode::from_str("Scrape-Tor"), ProxyMode::ScrapeTorFallback);
+    }
+}
