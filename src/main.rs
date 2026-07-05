@@ -453,6 +453,9 @@ impl ProxyPool {
     }
 
     fn next(&mut self) -> Option<(usize, Client)> {
+        if self.clients.is_empty() {
+            return None;
+        }
         let now = Instant::now();
         self.active_indices.clear();
         self.active_weights.clear();
@@ -507,15 +510,20 @@ impl ProxyPool {
                     .filter(|&&i| self.circuit_cooldown[i] <= now)
                     .cloned().collect();
                 if !recent_circuits.is_empty() {
-                    let new_idx = recent_circuits[self.circuit_rotation_counter.fetch_add(1, Ordering::Relaxed) % recent_circuits.len()];
+                    let counter = self.circuit_rotation_counter.fetch_add(1, Ordering::Relaxed);
+                    let new_idx = recent_circuits[counter % recent_circuits.len()];
                     return Some((new_idx, self.clients[new_idx].clone()));
                 }
                 // Fallback: prefer different circuits each call
                 let tor_indices: Vec<usize> = self.active_indices.iter()
                     .filter(|&&i| self.labels[i].contains("tor"))
                     .cloned().collect();
-                let new_idx = tor_indices[rng.random_range(0..tor_indices.len())];
-                return Some((new_idx, self.clients[new_idx].clone()));
+                if !tor_indices.is_empty() {
+                    let new_idx = tor_indices[rng.random_range(0..tor_indices.len())];
+                    return Some((new_idx, self.clients[new_idx].clone()));
+                }
+                // Fallback: the chosen active index is non-Tor, use it directly
+                return Some((idx, self.clients[idx].clone()));
             }
         }
 
