@@ -1278,7 +1278,7 @@ fn url_join(base: &str, href: &str) -> String {
     if href.starts_with("http://") || href.starts_with("https://") { return href.to_string(); }
     if href.starts_with("//") { return format!("https:{}", href); }
     let base = base.trim_end_matches('/');
-    if href.starts_with('/') { format!("{}{}", base, href.trim_start_matches('/')) } else { format!("{}{}", base, href) }
+    format!("{}/{}", base, href.trim_start_matches('/'))
 }
 
 async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) -> Result<(), reqwest::Error> {
@@ -3388,6 +3388,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]
@@ -3399,6 +3400,61 @@ mod tests {
             err
         );
         assert!(err.downcast_ref::<std::io::Error>().is_some());
+    }
+
+    #[test]
+    fn detect_scheme_values() {
+        assert_eq!(detect_scheme("http://example.com"), "http");
+        assert_eq!(detect_scheme("https://example.com"), "http");
+        assert_eq!(detect_scheme("SOCKS5://127.0.0.1:9050"), "socks5");
+        assert_eq!(detect_scheme("socks4://127.0.0.1:9050"), "socks4");
+        assert_eq!(detect_scheme("SOCKS://127.0.0.1:9050"), "socks5");
+        assert_eq!(detect_scheme(""), "http");
+    }
+
+    #[test]
+    fn url_join_cases() {
+        assert_eq!(url_join("https://example.com", "/path"), "https://example.com/path".to_string());
+        assert_eq!(url_join("https://example.com/", "path"), "https://example.com/path".to_string());
+        assert_eq!(url_join("https://example.com", "https://other.net/x"), "https://other.net/x".to_string());
+        assert_eq!(url_join("https://example.com", "//cdn.net/x"), "https://cdn.net/x".to_string());
+        assert_eq!(url_join("https://example.com", "data:text/plain,x"), String::new());
+        assert_eq!(url_join("https://example.com", "#anchor"), String::new());
+    }
+
+    fn default_test_config() -> ClientConfig {
+        ClientConfig::default()
+    }
+
+    #[test]
+    fn proxy_pool_new_empty() {
+        let mut pool = ProxyPool::new(&[], &default_test_config(), "weighted");
+        assert!(pool.clients.is_empty());
+        assert!(pool.next().is_none());
+    }
+
+    #[test]
+    fn proxy_pool_new_non_empty_and_next() {
+        let proxies = vec!["http://127.0.0.1:8080".to_string(), "http://127.0.0.1:8081".to_string()];
+        let mut pool = ProxyPool::new(&proxies, &default_test_config(), "weighted");
+        assert_eq!(pool.clients.len(), 2);
+        let (_idx, _client) = pool.next().expect("non-empty pool should return a proxy");
+    }
+
+    #[test]
+    fn proxy_pool_next_round_robin() {
+        let proxies = vec!["http://127.0.0.1:8080".to_string(), "http://127.0.0.1:8081".to_string()];
+        let mut pool = ProxyPool::new(&proxies, &default_test_config(), "round-robin");
+        let first = pool.next();
+        let second = pool.next();
+        assert!(first.is_some());
+        assert!(second.is_some());
+    }
+
+    #[test]
+    fn proxy_pool_next_empty_returns_none() {
+        let mut pool = ProxyPool::new(&[], &default_test_config(), "weighted");
+        assert!(pool.next().is_none());
     }
 
     fn rate_limit_delay_ms(rate: Option<u64>) -> u64 {
