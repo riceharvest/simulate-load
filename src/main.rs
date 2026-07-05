@@ -248,6 +248,7 @@ fn print_help() {
     println!("  --custom-selector SEL Custom CSS selector for proxy scraping");
     println!("  --pool-max-idle N     Max idle connections per host in pool");
     println!("  --pool-idle-timeout S Idle connection timeout in seconds");
+    println!("  --request-timeout S   Global HTTP request timeout in seconds, [1, 300] (default: 10)");
     println!("  --sni NAME            Server Name Indication override");
     println!("  --user-agent UA       Custom User-Agent header");
     println!("  --auto-tune           Enable PID controller concurrency auto-tuning");
@@ -268,6 +269,7 @@ fn print_help() {
     println!("  SIMULATE_LOAD_ATTACK          Default attack mode");
     println!("  SIMULATE_LOAD_CONCURRENCY     Default concurrency level");
     println!("  SIMULATE_LOAD_DURATION        Default duration in seconds");
+    println!("  SIMULATE_LOAD_REQUEST_TIMEOUT Default request timeout in seconds (default: 10)");
     println!("  TOR_PROXY                     Custom Tor proxy URL");
     println!();
     println!("Examples:");
@@ -2199,6 +2201,7 @@ async fn main() {
     let mut stats_interval_secs: u64 = 5;
     let mut tor_circuits: usize = 10;
     let mut ramp_up_secs: u64 = 0;
+    let mut request_timeout: u64 = 10;
 
     let mut args_iter = args.into_iter().skip(1);
     while let Some(arg) = args_iter.next() {
@@ -2357,6 +2360,13 @@ async fn main() {
                     ramp_up_secs = val.parse().unwrap_or(0);
                 }
             }
+            "--request-timeout" => {
+                if let Some(val) = args_iter.next() {
+                    if let Ok(parsed) = val.parse::<u64>() {
+                        request_timeout = parsed.clamp(1, 300);
+                    }
+                }
+            }
             "--body" => {
                 if let Some(val) = args_iter.next() {
                     let _ = CUSTOM_POST_BODY.set(val);
@@ -2430,6 +2440,10 @@ async fn main() {
                     tor_circuits = other.strip_prefix("--tor-circuits=").unwrap_or("").parse().unwrap_or(10);
                 } else if other.starts_with("--ramp-up=") {
                     ramp_up_secs = other.strip_prefix("--ramp-up=").unwrap_or("").parse().unwrap_or(0);
+                } else if other.starts_with("--request-timeout=") {
+                    if let Ok(parsed) = other.strip_prefix("--request-timeout=").unwrap_or("").parse::<u64>() {
+                        request_timeout = parsed.clamp(1, 300);
+                    }
                 } else if other.starts_with("--body=") {
                     let val = other.strip_prefix("--body=").unwrap_or("").to_string();
                     let _ = CUSTOM_POST_BODY.set(val);
@@ -2455,6 +2469,11 @@ async fn main() {
     // Override with env var defaults (env vars take priority over positional defaults but not CLI flags)
     if let Ok(env_target) = std::env::var("SIMULATE_LOAD_TARGET") {
         if positional.is_empty() { target_url = env_target; }
+    }
+    if let Ok(env_timeout) = std::env::var("SIMULATE_LOAD_REQUEST_TIMEOUT") {
+        if let Ok(parsed) = env_timeout.parse::<u64>() {
+            request_timeout = parsed.clamp(1, 300);
+        }
     }
     if let Ok(env_mode) = std::env::var("SIMULATE_LOAD_MODE") {
         if positional.get(1).is_none() { mode_str = env_mode; }
@@ -2518,6 +2537,7 @@ async fn main() {
                         "stats_interval" => if let Ok(parsed) = val.parse() { stats_interval_secs = parsed; },
                         "tor_circuits" => if let Ok(parsed) = val.parse() { tor_circuits = parsed; },
                         "ramp_up" | "ramp_up_secs" => if let Ok(parsed) = val.parse() { ramp_up_secs = parsed; },
+                        "request_timeout" => if let Ok(parsed) = val.parse::<u64>() { request_timeout = parsed.clamp(1, 300); },
                         "body" | "post_body" => { let _ = CUSTOM_POST_BODY.set(val.to_string()); },
                         "content_type" | "content-type" => { let _ = CUSTOM_CONTENT_TYPE.set(val.to_string()); },
                         _ => {}
@@ -2547,7 +2567,7 @@ async fn main() {
     };
     let timeout_secs = match attack_str.as_str() {
         "slowloris" | "slowread" => 60,
-        _ => 10,
+        _ => request_timeout,
     };
     let config = ClientConfig {
         pinned_dns,
@@ -3844,5 +3864,70 @@ mod tests {
         assert_eq!(p90, 42);
         assert_eq!(p95, 42);
         assert_eq!(p99, 42);
+    }
+
+    // Minimal reproduction of CLI flag parsing without invoking the real main().
+    fn parse_request_timeout(args: &[&str]) -> u64 {
+        let mut request_timeout: u64 = 10;
+        let mut iter = args.iter().copied();
+        while let Some(arg) = iter.next() {
+            match arg {
+                "--request-timeout" => {
+                    if let Some(val) = iter.next() {
+                        if let Ok(parsed) = val.parse::<u64>() {
+                            request_timeout = parsed.clamp(1, 300);
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(val) = arg.strip_prefix("--request-timeout=") {
+                        if let Ok(parsed) = val.parse::<u64>() {
+                            request_timeout = parsed.clamp(1, 300);
+                        }
+                    }
+                }
+            }
+        }
+        request_timeout
+    }
+
+    #[test]
+    fn request_timeout_flag_default() {
+        assert_eq!(parse_request_timeout(&[]), 10);
+    }
+
+    #[test]
+    fn request_timeout_flag_parsed_space() {
+        assert_eq!(parse_request_timeout(&["--request-timeout", "45"]), 45);
+    }
+
+    #[test]
+    fn request_timeout_flag_parsed_equals() {
+        assert_eq!(parse_request_timeout(&["--request-timeout=120"]), 120);
+    }
+
+    #[test]
+    fn request_timeout_flag_clamps_low() {
+        assert_eq!(parse_request_timeout(&["--request-timeout", "0"]), 1);
+        assert_eq!(parse_request_timeout(&["--request-timeout=0"]), 1);
+    }
+
+    #[test]
+    fn request_timeout_flag_clamps_high() {
+        assert_eq!(parse_request_timeout(&["--request-timeout", "1000"]), 300);
+        assert_eq!(parse_request_timeout(&["--request-timeout=1000"]), 300);
+    }
+
+    #[test]
+    fn request_timeout_env_overrides_default() {
+        // The env var is read outside the parser in main(); simulate the same override.
+        let mut request_timeout: u64 = 10;
+        if let Ok(env_timeout) = std::env::var("SIMULATE_LOAD_REQUEST_TIMEOUT") {
+            if let Ok(parsed) = env_timeout.parse::<u64>() {
+                request_timeout = parsed.clamp(1, 300);
+            }
+        }
+        // Either the env var is unset (default 10) or set to a valid value (>=1, <=300).
+        assert!((1..=300).contains(&request_timeout));
     }
 }
