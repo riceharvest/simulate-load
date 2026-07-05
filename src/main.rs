@@ -1259,7 +1259,7 @@ fn url_join(base: &str, href: &str) -> String {
     if href.starts_with('/') { format!("{}{}", base, href.trim_start_matches('/')) } else { format!("{}{}", base, href) }
 }
 
-async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
+async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) -> Result<(), reqwest::Error> {
     let (config, tor_proxy_opt, mode) = {
         let st = state.lock().await;
         (st.client_config.clone(), st.tor_proxy.clone(), st.mode)
@@ -1280,10 +1280,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
             builder = builder.proxy(proxy_val);
         }
     }
-    let c = builder.build().unwrap_or_else(|e| {
-        eprintln!("  Failed to build HTTP client: {}", e);
-        std::process::exit(1);
-    });
+    let c = builder.build()?;
 
     let base = target_url.trim_end_matches('/');
     let mut vercel = false; let mut plan = String::new(); let mut middleware = false;
@@ -1486,6 +1483,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     st.probe_status = status; st.is_vercel = vercel; st.vercel_plan = plan; st.has_image_opt = imgopt; st.has_api = !apis.is_empty(); st.has_middleware = middleware;
     st.has_isr = isr; st.has_cache_bypass = cache_bypass; st.has_edge_config = edge_config; st.has_log_drains = vercel; st.has_storage = false;
     st.imgs = imgs; st.apis = apis; st.statics = verified_statics;
+    Ok(())
 }
 
 async fn http_proxy_check(proxy_url: &str, target_url: &str, _config: &ClientConfig) -> bool {
@@ -2147,7 +2145,9 @@ async fn listen_stdin(state: Arc<Mutex<AppState>>) {
                             let state_clone = Arc::clone(&state);
                             let target_clone = val.to_string();
                             tokio::spawn(async move {
-                                probe_domain(&target_clone, &state_clone).await;
+                                if let Err(e) = probe_domain(&target_clone, &state_clone).await {
+                                    eprintln!("  Failed to probe domain: {}", e);
+                                }
                             });
                         }
                         "spoof_ip" => {
@@ -2701,7 +2701,9 @@ async fn main() {
         }
 
         println!("[1/1] Probing domain...");
-        probe_domain(&target_url, &state).await;
+        if let Err(e) = probe_domain(&target_url, &state).await {
+            eprintln!("  Failed to probe domain: {}", e);
+        }
         let status = {
             let st = state.lock().await;
             st.probe_status.clone()
@@ -2783,7 +2785,9 @@ async fn main() {
     }
 
     println!("[1/3] Probing domain...");
-    probe_domain(&target_url, &state).await;
+    if let Err(e) = probe_domain(&target_url, &state).await {
+        eprintln!("  Failed to probe domain: {}", e);
+    }
     let status = {
         let st = state.lock().await;
         st.probe_status.clone()
