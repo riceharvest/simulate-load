@@ -3845,4 +3845,70 @@ mod tests {
         assert!(resolve_control_addr("127.0.0.1:abc").is_err());
         assert!(resolve_control_addr("[::1:9051").is_err());
     }
+
+    #[test]
+    fn latency_samples_new_empty() {
+        let samples = LatencySamples::new(10);
+        assert_eq!(samples.samples.len(), 10);
+        assert_eq!(samples.idx.load(Ordering::Relaxed), 0);
+        for s in &samples.samples {
+            assert_eq!(s.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn latency_samples_percentiles_few_samples() {
+        let samples = LatencySamples::new(10_000);
+        for i in 1..=100u32 {
+            samples.record(i);
+        }
+        let (p50, p90, p95, p99) = samples.get_percentiles();
+        // 100 samples recorded, so res.len() == 100.
+        // res[100 * 50 / 100] = res[50] -> 51st element when 1-indexed, value 51.
+        // res[100 * 90 / 100] = res[90] -> 91st element, value 91.
+        // res[100 * 95 / 100] = res[95] -> 96th element, value 96.
+        // res[100 * 99 / 100] = res[99] -> 100th element, value 100.
+        assert_eq!(p50, 51, "p50 should be 51");
+        assert_eq!(p90, 91, "p90 should be 91");
+        assert_eq!(p95, 96, "p95 should be 96");
+        assert_eq!(p99, 100, "p99 should be 100");
+    }
+
+    #[test]
+    fn latency_samples_wraps_after_capacity() {
+        let capacity = 10;
+        let samples = LatencySamples::new(capacity);
+        for i in 1..=capacity + 5 {
+            samples.record(i as u32);
+        }
+        let (p50, p90, p95, p99) = samples.get_percentiles();
+        // After wrapping, the most recent 10 samples are 6..=15.
+        // Sorted: 6,7,8,9,10,11,12,13,14,15
+        let expected = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        assert_eq!(p50, expected[expected.len() * 50 / 100]);
+        assert_eq!(p90, expected[expected.len() * 90 / 100]);
+        assert_eq!(p95, expected[expected.len() * 95 / 100]);
+        assert_eq!(p99, expected[expected.len() * 99 / 100]);
+    }
+
+    #[test]
+    fn latency_samples_percentiles_empty() {
+        let samples = LatencySamples::new(10_000);
+        let (p50, p90, p95, p99) = samples.get_percentiles();
+        assert_eq!(p50, 0);
+        assert_eq!(p90, 0);
+        assert_eq!(p95, 0);
+        assert_eq!(p99, 0);
+    }
+
+    #[test]
+    fn latency_samples_percentiles_single_sample() {
+        let samples = LatencySamples::new(10_000);
+        samples.record(42);
+        let (p50, p90, p95, p99) = samples.get_percentiles();
+        assert_eq!(p50, 42);
+        assert_eq!(p90, 42);
+        assert_eq!(p95, 42);
+        assert_eq!(p99, 42);
+    }
 }
