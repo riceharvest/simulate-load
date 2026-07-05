@@ -3522,4 +3522,104 @@ mod tests {
         }
         assert!(out.is_empty(), "expected empty result for custom selector without proxies, got {:?}", out);
     }
+
+    fn cookie_sessions(cookie: &str) -> Vec<std::sync::Mutex<String>> {
+        vec![std::sync::Mutex::new(cookie.to_string())]
+    }
+
+    #[test]
+    fn add_session_cookie_adds_header() {
+        let client = Client::new();
+        let sessions = cookie_sessions("session_id=abc123");
+        let builder = client.get("https://example.com/path");
+        let builder = add_session_cookie(builder, 0, &sessions);
+        let request = builder.build().expect("request should build");
+        let cookie = request.headers().get("Cookie").expect("Cookie header should exist");
+        assert_eq!(cookie.to_str().unwrap(), "session_id=abc123");
+    }
+
+    #[test]
+    fn add_session_cookie_skips_when_session_empty() {
+        let client = Client::new();
+        let sessions = cookie_sessions("");
+        let builder = client.get("https://example.com/path");
+        let builder = add_session_cookie(builder, 0, &sessions);
+        let request = builder.build().expect("request should build");
+        assert!(request.headers().get("Cookie").is_none());
+    }
+
+    #[test]
+    fn add_session_cookie_skips_out_of_bounds() {
+        let client = Client::new();
+        let sessions = cookie_sessions("session_id=abc123");
+        let builder = client.get("https://example.com/path");
+        let builder = add_session_cookie(builder, 5, &sessions);
+        let request = builder.build().expect("request should build");
+        assert!(request.headers().get("Cookie").is_none());
+    }
+
+    #[test]
+    fn add_session_and_extra_cookie_combines_with_session() {
+        let client = Client::new();
+        let sessions = cookie_sessions("session_id=abc123");
+        let builder = client.get("https://example.com/path");
+        let builder = add_session_and_extra_cookie(builder, 0, &sessions, "extra=xyz");
+        let request = builder.build().expect("request should build");
+        let cookie = request.headers().get("Cookie").expect("Cookie header should exist");
+        let value = cookie.to_str().unwrap();
+        assert!(value.contains("session_id=abc123"), "missing session cookie: {}", value);
+        assert!(value.contains("extra=xyz"), "missing extra cookie: {}", value);
+    }
+
+    #[test]
+    fn add_session_and_extra_cookie_uses_extra_only_when_session_empty() {
+        let client = Client::new();
+        let sessions = cookie_sessions("");
+        let builder = client.get("https://example.com/path");
+        let builder = add_session_and_extra_cookie(builder, 0, &sessions, "extra=xyz");
+        let request = builder.build().expect("request should build");
+        let cookie = request.headers().get("Cookie").expect("Cookie header should exist");
+        assert_eq!(cookie.to_str().unwrap(), "extra=xyz");
+    }
+
+    #[test]
+    fn add_session_and_extra_cookie_out_of_bounds() {
+        let client = Client::new();
+        let sessions = cookie_sessions("session_id=abc123");
+        let builder = client.get("https://example.com/path");
+        let builder = add_session_and_extra_cookie(builder, 5, &sessions, "extra=xyz");
+        let request = builder.build().expect("request should build");
+        let cookie = request.headers().get("Cookie").expect("Cookie header should exist");
+        assert_eq!(cookie.to_str().unwrap(), "extra=xyz");
+    }
+
+    #[test]
+    fn update_session_from_headers_updates_stored_cookie() {
+        let sessions = cookie_sessions("old=value");
+        let mut headers = HeaderMap::new();
+        headers.insert(SET_COOKIE, "new_session=updated".parse().unwrap());
+        update_session_from_headers(0, &sessions, &headers);
+        let updated = sessions[0].lock().unwrap().clone();
+        assert_eq!(updated, "new_session=updated");
+    }
+
+    #[test]
+    fn update_session_from_headers_extracts_first_cookie_value_only() {
+        let sessions = cookie_sessions("old=value");
+        let mut headers = HeaderMap::new();
+        headers.insert(SET_COOKIE, "id=first; Path=/; HttpOnly".parse().unwrap());
+        update_session_from_headers(0, &sessions, &headers);
+        let updated = sessions[0].lock().unwrap().clone();
+        assert_eq!(updated, "id=first");
+    }
+
+    #[test]
+    fn update_session_from_headers_out_of_bounds_is_no_op() {
+        let sessions = cookie_sessions("old=value");
+        let mut headers = HeaderMap::new();
+        headers.insert(SET_COOKIE, "new_session=updated".parse().unwrap());
+        update_session_from_headers(5, &sessions, &headers);
+        let updated = sessions[0].lock().unwrap().clone();
+        assert_eq!(updated, "old=value");
+    }
 }
