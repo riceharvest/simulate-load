@@ -324,7 +324,7 @@ impl std::fmt::Display for ProxyMode {
 }
 impl ProxyMode {
     fn from_str(s: &str) -> Self {
-        match s {
+        match s.to_ascii_lowercase().as_str() {
             "tor" => ProxyMode::Tor,
             "scrape-tor" => ProxyMode::ScrapeTorFallback,
             _ => ProxyMode::Scrape,
@@ -355,7 +355,7 @@ impl std::fmt::Display for AttackMode {
 }
 impl AttackMode {
     fn from_str(s: &str) -> Self {
-        match s {
+        match s.to_ascii_lowercase().as_str() {
             "bandwidth" => AttackMode::Bandwidth,
             "slowread" => AttackMode::SlowRead,
             "imageopt" => AttackMode::ImageOpt,
