@@ -16,10 +16,6 @@ use url::Url;
 
 type FetchError = Box<dyn std::error::Error + Send + Sync>;
 
-fn fetch_error_all_attempts_exhausted(name: &str) -> FetchError {
-    FetchError::from(std::io::Error::other(format!("{name}: all attempts exhausted")))
-}
-
 async fn clone_request_builder_with_retry(
     builder: &RequestBuilder,
     name: &str,
@@ -837,6 +833,7 @@ async fn fetch_page(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
     Ok((bytes, status))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_page_with_referrer(
     c: Client,
     url: String,
@@ -845,6 +842,7 @@ async fn fetch_page_with_referrer(
     proxy_idx: usize,
     sessions: Arc<Vec<std::sync::Mutex<String>>>,
     verbose: bool,
+    max_retries: usize,
 ) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
@@ -855,33 +853,14 @@ async fn fetch_page_with_referrer(
         builder = builder.header("Referer", ref_val);
     }
     let builder = add_session_cookie(builder, proxy_idx, &sessions);
-    let mut last_err = None;
-    for attempt in 0..=2 {
-        match clone_request_builder_with_retry(&builder, "fetch_page_with_referrer").await {
-            Ok(cloned) => match cloned.send().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-                    let bytes = resp.bytes().await?.len();
-                    return Ok((bytes, status));
-                }
-                Err(e) => {
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                    }
-                    last_err = Some(e);
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    match last_err {
-        Some(e) => Err(FetchError::from(e)),
-        None => Err(fetch_error_all_attempts_exhausted("fetch_page_with_referrer")),
-    }
+    let resp = send_with_retry(builder, max_retries, "fetch_page_with_referrer").await?;
+    let status = resp.status().as_u16();
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
 }
 
-async fn fetch_range(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
+async fn fetch_range(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool, max_retries: usize) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let end = 100 + (rand::rng().random_range(0..9000));
     if verbose {
@@ -890,72 +869,34 @@ async fn fetch_range(c: Client, url: String, delay: u64, proxy_idx: usize, sessi
     let builder = browser_request(c.get(&url), false).header("Range", format!("bytes=0-{}", end))
         .header("Accept", "*/*").header("Cache-Control", "no-cache");
     let builder = add_session_cookie(builder, proxy_idx, &sessions);
-    let mut last_err = None;
-    for attempt in 0..=2 {
-        match clone_request_builder_with_retry(&builder, "fetch_range").await {
-            Ok(cloned) => match cloned.send().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-                    let bytes = resp.bytes().await?.len();
-                    return Ok((bytes, status));
-                }
-                Err(e) => {
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                    }
-                    last_err = Some(e);
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    match last_err {
-        Some(e) => Err(FetchError::from(e)),
-        None => Err(fetch_error_all_attempts_exhausted("fetch_range")),
-    }
+    let resp = send_with_retry(builder, max_retries, "fetch_range").await?;
+    let status = resp.status().as_u16();
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
 }
 
-async fn fetch_slow(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
+async fn fetch_slow(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool, max_retries: usize) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_slow: GET {} (proxy #{}), streaming", url, proxy_idx);
     }
     let builder = browser_request(c.get(&url), false).header("Accept", "*/*").header("Cache-Control", "no-cache");
     let builder = add_session_cookie(builder, proxy_idx, &sessions);
-    let mut last_err = None;
-    for attempt in 0..=2 {
-        match clone_request_builder_with_retry(&builder, "fetch_slow").await {
-            Ok(cloned) => match cloned.send().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-                    let mut total = 0usize;
-                    let mut stream = resp.bytes_stream();
-                    use tokio_stream::StreamExt;
-                    while let Some(chunk) = stream.next().await {
-                        if let Ok(c) = &chunk { total += c.len(); }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                    return Ok((total, status));
-                }
-                Err(e) => {
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                    }
-                    last_err = Some(e);
-                }
-            }
-            Err(e) => return Err(e),
-        }
+    let resp = send_with_retry(builder, max_retries, "fetch_slow").await?;
+    let status = resp.status().as_u16();
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+    let mut total = 0usize;
+    let mut stream = resp.bytes_stream();
+    use tokio_stream::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        if let Ok(c) = &chunk { total += c.len(); }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    match last_err {
-        Some(e) => Err(FetchError::from(e)),
-        None => Err(fetch_error_all_attempts_exhausted("fetch_slow")),
-    }
+    Ok((total, status))
 }
 
-async fn fetch_post(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
+async fn fetch_post(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool, max_retries: usize) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_post: POST {} (proxy #{})", url, proxy_idx);
@@ -966,33 +907,14 @@ async fn fetch_post(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
     let builder = browser_request(c.post(&url), false).header("Content-Type", content_type)
         .header("Cache-Control", "no-cache").body(body);
     let builder = add_session_cookie(builder, proxy_idx, &sessions);
-    let mut last_err = None;
-    for attempt in 0..=2 {
-        match clone_request_builder_with_retry(&builder, "fetch_post").await {
-            Ok(cloned) => match cloned.send().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-                    let bytes = resp.bytes().await?.len();
-                    return Ok((bytes, status));
-                }
-                Err(e) => {
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                    }
-                    last_err = Some(e);
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    match last_err {
-        Some(e) => Err(FetchError::from(e)),
-        None => Err(fetch_error_all_attempts_exhausted("fetch_post")),
-    }
+    let resp = send_with_retry(builder, max_retries, "fetch_post").await?;
+    let status = resp.status().as_u16();
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
 }
 
-async fn fetch_cookie(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
+async fn fetch_cookie(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool, max_retries: usize) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_cookie: GET {} with cookie bomb (8KB payload) (proxy #{})", url, proxy_idx);
@@ -1002,33 +924,14 @@ async fn fetch_cookie(c: Client, url: String, delay: u64, proxy_idx: usize, sess
         rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), bomb_payload);
     let builder = browser_request(c.get(&url), false).header("Accept", "*/*").header("Cache-Control", "no-cache");
     let builder = add_session_and_extra_cookie(builder, proxy_idx, &sessions, &cookie);
-    let mut last_err = None;
-    for attempt in 0..=2 {
-        match clone_request_builder_with_retry(&builder, "fetch_cookie").await {
-            Ok(cloned) => match cloned.send().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-                    let bytes = resp.bytes().await?.len();
-                    return Ok((bytes, status));
-                }
-                Err(e) => {
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                    }
-                    last_err = Some(e);
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    match last_err {
-        Some(e) => Err(FetchError::from(e)),
-        None => Err(fetch_error_all_attempts_exhausted("fetch_cookie")),
-    }
+    let resp = send_with_retry(builder, max_retries, "fetch_cookie").await?;
+    let status = resp.status().as_u16();
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
 }
 
-async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
+async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool, max_retries: usize) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_slowloris: POST {} slowloris attack (proxy #{})", url, proxy_idx);
@@ -1044,72 +947,32 @@ async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, s
         .header("Cache-Control", "no-cache")
         .body(body);
     let builder = add_session_cookie(builder, proxy_idx, &sessions);
-    let mut last_err = None;
-    for attempt in 0..=2 {
-        match clone_request_builder_with_retry(&builder, "fetch_slowloris").await {
-            Ok(cloned) => match cloned.send().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-                    let bytes = resp.bytes().await?.len();
-                    return Ok((bytes, status));
-                }
-                Err(e) => {
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                    }
-                    last_err = Some(e);
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    match last_err {
-        Some(e) => Err(FetchError::from(e)),
-        None => Err(fetch_error_all_attempts_exhausted("fetch_slowloris")),
-    }
+    let resp = send_with_retry(builder, max_retries, "fetch_slowloris").await?;
+    let status = resp.status().as_u16();
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
 }
 
 /// Bandwidth mode: request a large range from the server to actually
 /// consume downstream bandwidth. Uses a `Range: bytes=0-99999999` header
 /// to ask for a large chunk; many servers return 206 Partial Content.
-async fn fetch_bandwidth(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), FetchError> {
+async fn fetch_bandwidth(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool, max_retries: usize) -> Result<(usize, u16), FetchError> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     if verbose {
         println!("[VERBOSE] fetch_bandwidth: GET {} with Range header (proxy #{})", url, proxy_idx);
     }
     let builder = add_session_cookie(browser_request(c.get(&url), false), proxy_idx, &sessions);
     let builder = builder.header(reqwest::header::RANGE, "bytes=0-99999999");
-    let mut last_err = None;
-    for attempt in 0..=2 {
-        match clone_request_builder_with_retry(&builder, "fetch_bandwidth").await {
-            Ok(cloned) => match cloned.send().await {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-                    // Read the full body to actually consume bandwidth
-                    let bytes = resp.bytes().await?.len();
-                    if verbose {
-                        println!("  [BANDWIDTH] Got {} bytes (HTTP {})", bytes, status);
-                    }
-                    return Ok((bytes, status));
-                }
-                Err(e) => {
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                    }
-                    if attempt == 2 {
-                        last_err = Some(e);
-                    }
-                }
-            }
-            Err(e) => return Err(e),
-        }
+    let resp = send_with_retry(builder, max_retries, "fetch_bandwidth").await?;
+    let status = resp.status().as_u16();
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+    // Read the full body to actually consume bandwidth
+    let bytes = resp.bytes().await?.len();
+    if verbose {
+        println!("  [BANDWIDTH] Got {} bytes (HTTP {})", bytes, status);
     }
-    match last_err {
-        Some(e) => Err(FetchError::from(e)),
-        None => Err(fetch_error_all_attempts_exhausted("fetch_bandwidth")),
-    }
+    Ok((bytes, status))
 }
 
 struct LatencySamples {
@@ -1800,30 +1663,30 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
 
                     let result = match attack {
                         AttackMode::Bandwidth => {
-                            fetch_bandwidth(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
+                            fetch_bandwidth(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::Normal => {
-                            fetch_page_with_referrer(client, req_url, referrer, req_delay, idx, sessions_clone.clone(), verbose).await
+                            fetch_page_with_referrer(client, req_url, referrer, req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::SlowRead => {
-                            fetch_slow(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
+                            fetch_slow(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::ImageOpt => {
                             if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
-                            else { fetch_range(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
+                            else { fetch_range(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
                         }
                         AttackMode::LargePost => {
-                            fetch_post(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
+                            fetch_post(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::AssetSpray => {
-                            fetch_page_with_referrer(client, req_url, referrer, req_delay, idx, sessions_clone.clone(), verbose).await
+                            fetch_page_with_referrer(client, req_url, referrer, req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::RangeReq => {
-                            if assets.is_empty() { fetch_range(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
-                            else { fetch_range(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
+                            if assets.is_empty() { fetch_range(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
+                            else { fetch_range(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
                         }
                         AttackMode::CookieBomb => {
-                            fetch_cookie(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
+                            fetch_cookie(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::Ssr => {
                             if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
@@ -1841,7 +1704,7 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                             fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::Slowloris => {
-                            fetch_slowloris(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
+                            fetch_slowloris(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                     };
                     let latency = start_req.elapsed().as_millis() as u64;
@@ -3383,10 +3246,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fetch_error_all_attempts_exhausted_message() {
-        let err = fetch_error_all_attempts_exhausted("fetch_page");
+    fn send_with_retry_final_fallback_error_message() {
+        let err: FetchError = FetchError::from(std::io::Error::other("send_with_retry: all retries exhausted"));
         assert!(
-            err.to_string().contains("fetch_page: all attempts exhausted"),
+            err.to_string().contains("send_with_retry: all retries exhausted"),
             "unexpected error: {}",
             err
         );
