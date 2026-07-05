@@ -1682,7 +1682,7 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
             // Rate limiting: if rate_limit is Some(n), enforce max requests per second
             if let Some(rate) = rate_limit {
                 if rate > 0 {
-                    let interval_ms = 1000 / rate;
+                    let interval_ms = 1000u64.saturating_div(rate);
                     tokio::time::sleep(Duration::from_millis(interval_ms)).await;
                 }
             }
@@ -3294,6 +3294,24 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{AttackMode, ProxyMode};
+
+    fn rate_limit_delay_ms(rate: Option<u64>) -> u64 {
+        match rate {
+            Some(rate) if rate > 0 => 1000u64.saturating_div(rate),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn rate_limit_delay_calculation() {
+        assert_eq!(rate_limit_delay_ms(Some(1)), 1000);
+        assert_eq!(rate_limit_delay_ms(Some(2)), 500);
+        assert_eq!(rate_limit_delay_ms(Some(1000)), 1);
+        assert_eq!(rate_limit_delay_ms(Some(0)), 0);
+        assert_eq!(rate_limit_delay_ms(None), 0);
+        // Defense-in-depth: very large rate saturates to 0 instead of underflowing.
+        assert_eq!(rate_limit_delay_ms(Some(u64::MAX)), 0);
+    }
 
     #[test]
     fn attack_mode_case_insensitive() {
