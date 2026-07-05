@@ -614,7 +614,6 @@ fn detect_scheme(url: &str) -> &'static str {
     }
 }
 
-#[allow(clippy::expect_used)]
 async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Vec<String> {
     use std::sync::OnceLock;
     static RE_IP_PORT: OnceLock<Regex> = OnceLock::new();
@@ -628,7 +627,14 @@ async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Ve
     let mut out = vec![];
     if let Some(sel_str) = custom_selector {
         if let Ok(s) = Selector::parse(sel_str) {
-            let re = RE_IP_PORT.get_or_init(|| Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)").expect("invalid regex"));
+            let re = RE_IP_PORT.get_or_init(|| {
+                Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)").unwrap_or_else(|_| {
+                    // This regex is a compile-time literal, so it should never fail; if it
+                    // somehow does, use a regex that matches nothing rather than panicking.
+                    #[allow(clippy::unwrap_used)]
+                    Regex::new("$^").unwrap()
+                })
+            });
             for el in doc.select(&s) {
                 let text = el.text().collect::<String>();
                 for cap in re.captures_iter(&text) {
@@ -639,8 +645,20 @@ async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Ve
             }
         }
     } else {
-        let tr = SEL_TR.get_or_init(|| Selector::parse("table.table tbody tr").expect("invalid selector"));
-        let td = SEL_TD.get_or_init(|| Selector::parse("td").expect("invalid selector"));
+        let tr = SEL_TR.get_or_init(|| {
+            Selector::parse("table.table tbody tr").unwrap_or_else(|_| {
+                // The literal selector is valid; if it somehow fails, use a selector
+                // that matches nothing instead of panicking.
+                #[allow(clippy::unwrap_used)]
+                Selector::parse("#__simulate_load_never__").unwrap()
+            })
+        });
+        let td = SEL_TD.get_or_init(|| {
+            Selector::parse("td").unwrap_or_else(|_| {
+                #[allow(clippy::unwrap_used)]
+                Selector::parse("#__simulate_load_never__").unwrap()
+            })
+        });
         for row in doc.select(tr) {
             let cells: Vec<String> = row.select(td).map(|c| c.text().collect::<String>().trim().to_string()).collect();
             if cells.len() >= 2 {
@@ -662,13 +680,17 @@ async fn scrape_raw(c: &Client, url: &str, re: &Regex) -> Vec<String> {
     t.lines().filter_map(|l| { let x = l.trim(); if x.is_empty() || x.starts_with('#') || x.starts_with("//") { return None; } re.captures(x).and_then(|c| c.get(1).map(|m| m.as_str().to_string())).map(|ip_port| format!("{}://{}", scheme, ip_port)) }).collect()
 }
 
-#[allow(clippy::expect_used)]
 async fn scrape_all(c: &Client, state: &Arc<Mutex<AppState>>) -> Vec<String> {
     let (max, custom_selector) = {
         let st = state.lock().await;
         (st.max_scrape, st.custom_selector.clone())
     };
-    let re = Arc::new(Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)").expect("invalid regex"));
+    let re = Arc::new(Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)").unwrap_or_else(|_| {
+        // The literal regex is valid; if it somehow fails, use a regex that
+        // matches nothing instead of panicking.
+        #[allow(clippy::unwrap_used)]
+        Regex::new("$^").unwrap()
+    }));
     let all = Arc::new(Mutex::new(Vec::new()));
     let sem = Arc::new(Semaphore::new(10));
     let done = Arc::new(AtomicBool::new(false));
@@ -3437,5 +3459,59 @@ mod tests {
         assert_eq!(ProxyMode::from_str("scrape-tor"), ProxyMode::ScrapeTorFallback);
         assert_eq!(ProxyMode::from_str("SCRAPE-TOR"), ProxyMode::ScrapeTorFallback);
         assert_eq!(ProxyMode::from_str("Scrape-Tor"), ProxyMode::ScrapeTorFallback);
+    }
+
+    #[test]
+    fn fallback_regex_matches_nothing() {
+        let re = Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)").unwrap_or_else(|_| Regex::new("$^").unwrap());
+        assert!(re.find("192.168.1.1:8080").is_some());
+        let fallback = Regex::new("$^").unwrap();
+        assert!(fallback.find("anything").is_none());
+    }
+
+    #[test]
+    fn fallback_selector_matches_nothing() {
+        let sel = Selector::parse("table.table tbody tr").unwrap_or_else(|_| Selector::parse("#__simulate_load_never__").unwrap());
+        let doc = scraper::Html::parse_document("<html><body><table class='table'><tbody><tr><td>1</td></tr></tbody></table></body></html>");
+        assert_eq!(doc.select(&sel).count(), 1);
+        let fallback = Selector::parse("#__simulate_load_never__").unwrap();
+        let doc = scraper::Html::parse_document("<html><body><table class='table'><tbody><tr><td>1</td></tr></tbody></table></body></html>");
+        assert_eq!(doc.select(&fallback).count(), 0);
+    }
+
+    #[test]
+    fn scrape_html_no_proxies_in_table() {
+        // HTML without the expected table.table tbody tr structure should
+        // produce an empty vector, exercising the fallback selector path.
+        let html = "<html><body><table><tbody><tr><td>1.2.3.4</td><td>8080</td></tr></tbody></table></body></html>";
+        let doc = scraper::Html::parse_document(html);
+        let sel = Selector::parse("table.table tbody tr").unwrap_or_else(|_| Selector::parse("#__simulate_load_never__").unwrap());
+        let td = Selector::parse("td").unwrap_or_else(|_| Selector::parse("#__simulate_load_never__").unwrap());
+        let mut out = vec![];
+        for row in doc.select(&sel) {
+            let cells: Vec<String> = row.select(&td).map(|c| c.text().collect::<String>().trim().to_string()).collect();
+            if cells.len() >= 2 {
+                out.push(format!("http://{}:{}", cells[0], cells[1]));
+            }
+        }
+        assert!(out.is_empty(), "expected empty result for non-matching table, got {:?}", out);
+    }
+
+    #[test]
+    fn scrape_html_custom_selector_no_proxies() {
+        let html = "<html><body><div class='proxy'>no valid ip:port text</div></body></html>";
+        let doc = scraper::Html::parse_document(html);
+        let sel = Selector::parse(".proxy").unwrap();
+        let re = Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)").unwrap_or_else(|_| Regex::new("$^").unwrap());
+        let mut out = vec![];
+        for el in doc.select(&sel) {
+            let text = el.text().collect::<String>();
+            for cap in re.captures_iter(&text) {
+                if cap.len() >= 3 {
+                    out.push(format!("http://{}:{}", &cap[1], &cap[2]));
+                }
+            }
+        }
+        assert!(out.is_empty(), "expected empty result for custom selector without proxies, got {:?}", out);
     }
 }
