@@ -1278,6 +1278,7 @@ dependencies = [
  "regex",
  "reqwest",
  "scraper",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "url",

