@@ -2764,8 +2764,8 @@ async fn main() {
     };
     match proxies {
         None => {
-            eprintln!("  Failed to get proxies. Exiting.");
-            std::process::exit(1);
+            eprintln!("  Failed to get proxies.");
+            return;
         }
         Some(prox_list) => {
             println!("  Got {} proxies", prox_list.len());
