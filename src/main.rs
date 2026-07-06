@@ -686,8 +686,8 @@ async fn scrape_html(c: &Client, url: &str, custom_selector: Option<&str>) -> Ve
         if let Ok(s) = Selector::parse(sel_str) {
             let re = RE_IP_PORT.get_or_init(|| {
                 Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)").unwrap_or_else(|_| {
-                    // This regex is a compile-time literal, so it should never fail; if it
-                    // somehow does, use a regex that matches nothing rather than panicking.
+                    // The literal regex is valid; if it somehow fails, use a regex that
+                    // matches nothing instead of panicking.
                     #[allow(clippy::unwrap_used)]
                     Regex::new("$^").unwrap()
                 })
