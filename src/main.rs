@@ -452,8 +452,8 @@ struct ProxyPool {
     circuit_stickiness: usize,
     // Circuit rotation counter for balanced distribution
     circuit_rotation_counter: AtomicUsize,
-    // Per-circuit request count for health scoring
-    circuit_requests: Arc<Mutex<HashMap<u32, usize>>>,
+    // Per-circuit stats for the final report: idx -> (total_requests, errors).
+    circuit_requests: Arc<std::sync::Mutex<HashMap<usize, (u64, u64)>>>,
     // Per-circuit ban expiry
     circuit_cooldown: Vec<Instant>,
     // Per-circuit consecutive failures (for exponential backoff)
@@ -508,7 +508,7 @@ impl ProxyPool {
             circuit_failures: vec![0; n],
             circuit_stickiness: config.tor_circuits.max(3),
             circuit_rotation_counter: AtomicUsize::new(0),
-            circuit_requests: Arc::new(Mutex::new(HashMap::new())),
+            circuit_requests: Arc::new(std::sync::Mutex::new(HashMap::<usize, (u64, u64)>::new())),
             rotation_strategy: rotation_strategy.to_string(),
         }
     }
@@ -607,6 +607,10 @@ impl ProxyPool {
                 0.3
             };
             self.weights[idx] = (self.weights[idx] * 0.85 + 0.15 * factor).clamp(0.01, 3.0);
+            if let Ok(mut m) = self.circuit_requests.lock() {
+                let e = m.entry(idx).or_insert((0, 0));
+                e.0 += 1;
+            }
         }
     }
 
@@ -633,6 +637,11 @@ impl ProxyPool {
                     _ => 180,
                 };
                 self.circuit_cooldown[idx] = Instant::now() + Duration::from_secs(ban_secs);
+            }
+            if let Ok(mut m) = self.circuit_requests.lock() {
+                let e = m.entry(idx).or_insert((0, 0));
+                e.0 += 1;
+                e.1 += 1;
             }
         }
     }
@@ -1078,8 +1087,12 @@ struct Stats {
     status_4xx: Arc<AtomicU64>,
     status_5xx: Arc<AtomicU64>,
     status_other: Arc<AtomicU64>,
+    // Per-status-code histogram (lock-free array indexed by code-100, covers 100..=999).
+    status_hist: Arc<[AtomicU64; 900]>,
     latency_samples: Arc<LatencySamples>,
     concurrency: Arc<AtomicUsize>,
+    // Set to true to force run_load to return (used by --find-max bursts).
+    abort: Arc<AtomicBool>,
 }
 
 impl Stats {
@@ -1098,8 +1111,10 @@ impl Stats {
             status_4xx: Arc::new(AtomicU64::new(0)),
             status_5xx: Arc::new(AtomicU64::new(0)),
             status_other: Arc::new(AtomicU64::new(0)),
+            status_hist: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
             latency_samples: Arc::new(LatencySamples::new(16384)),
             concurrency: Arc::new(AtomicUsize::new(20)),
+            abort: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -1651,7 +1666,10 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                 break;
             }
         }
-        if !stats.running.load(Ordering::Relaxed) { tokio::time::sleep(Duration::from_millis(100)).await; continue; }
+        if !stats.running.load(Ordering::Relaxed) {
+            if stats.abort.load(Ordering::Relaxed) { return; }
+            tokio::time::sleep(Duration::from_millis(100)).await; continue;
+        }
         
         let (new_conc, new_jitter, target_url) = {
             let st = state.lock().await;
@@ -1817,6 +1835,13 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                                     }
                                 }
                                 _ => { stats_clone.status_other.fetch_add(1, Ordering::Relaxed); }
+                            }
+                            // Per-status-code histogram (lock-free array indexed by code-100).
+                            {
+                                let code = status;
+                                if (100..=999).contains(&code) {
+                                    stats_clone.status_hist[code as usize - 100].fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                             if !(500..=599).contains(&status) {
                                 match pool_clone.lock() {
@@ -2258,6 +2283,7 @@ async fn main() {
     let mut stats_interval_secs: u64 = 5;
     let mut tor_circuits: usize = 3;
     let mut ramp_up_secs: u64 = 0;
+    let mut find_max = false;
     let mut request_timeout: u64 = 10;
 
     let mut args_iter = args.into_iter().skip(1);
@@ -2423,6 +2449,7 @@ async fn main() {
                     ramp_up_secs = val.parse().unwrap_or(0);
                 }
             }
+            "--find-max" => find_max = true,
             "--request-timeout" => {
                 if let Some(val) = args_iter.next() {
                     if let Ok(parsed) = val.parse::<u64>() {
@@ -2506,6 +2533,8 @@ async fn main() {
                     tor_circuits = other.strip_prefix("--tor-circuits=").unwrap_or("").parse().unwrap_or(3);
                 } else if other.starts_with("--ramp-up=") {
                     ramp_up_secs = other.strip_prefix("--ramp-up=").unwrap_or("").parse().unwrap_or(0);
+                } else if other == "--find-max" {
+                    find_max = true;
                 } else if other.starts_with("--request-timeout=") {
                     if let Ok(parsed) = other.strip_prefix("--request-timeout=").unwrap_or("").parse::<u64>() {
                         request_timeout = parsed.clamp(1, 300);
@@ -2988,6 +3017,65 @@ async fn main() {
             let stats_clone = stats.clone();
             let start = Instant::now();
             let mut elapsed_secs = duration_secs;
+
+            // -- Saturation-finder mode (--find-max) --
+            // Ramp concurrency up in doubling steps, run a short burst at each, and lock in the
+            // highest concurrency whose measured RPS still increased (i.e. before saturation/errors).
+            if find_max {
+                let step_secs = 6u64;
+                let mut best_conc = concurrency.max(1);
+                let mut best_rps = 0.0f64;
+                let mut prev_reqs = stats.total_requests.load(Ordering::Relaxed);
+                let mut prev_errs = stats.errors.load(Ordering::Relaxed);
+                let mut first = true;
+                let mut step = 2usize;
+                while step <= 512 {
+                    // Configure this burst's concurrency.
+                    {
+                        let mut st = state.lock().await;
+                        st.load_concurrency = step;
+                    }
+                    stats.concurrency.store(step, Ordering::Relaxed);
+                    stats.abort.store(false, Ordering::Relaxed);
+                    stats.running.store(true, Ordering::Relaxed);
+                    let burst_start = Instant::now();
+                    let handle = tokio::spawn(run_load(state.clone(), pool.clone(), stats.clone(), delay_ms, max_errors));
+                    tokio::time::sleep(Duration::from_secs(step_secs)).await;
+                    stats.abort.store(true, Ordering::Relaxed);
+                    stats.running.store(false, Ordering::Relaxed);
+                    let _ = handle.await;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+
+                    let now_reqs = stats.total_requests.load(Ordering::Relaxed);
+                    let now_errs = stats.errors.load(Ordering::Relaxed);
+                    let req_delta = now_reqs.saturating_sub(prev_reqs);
+                    let err_delta = now_errs.saturating_sub(prev_errs);
+                    let el = burst_start.elapsed().as_secs_f64().max(0.5);
+                    let rps = req_delta as f64 / el;
+                    let err_rate = if req_delta > 0 { err_delta as f64 / req_delta as f64 } else { 1.0 };
+                    println!("  [find-max] conc={:>3}  {:.1} req/s  (Δ{} req, {} err, {:.1}% err)", step, rps, req_delta, err_delta, err_rate * 100.0);
+
+                    if first {
+                        best_conc = step; best_rps = rps; first = false;
+                    } else if rps > best_rps * 1.02 && err_rate < 0.20 {
+                        // Throughput still scaling and errors acceptable -> keep climbing.
+                        best_conc = step; best_rps = rps;
+                    } else {
+                        // Saturated (RPS plateaued/dropped) or error spike -> stop here.
+                        break;
+                    }
+                    prev_reqs = now_reqs;
+                    prev_errs = now_errs;
+                    step *= 2;
+                }
+                println!("  [find-max] Max sustainable concurrency locked at {} (~{:.1} req/s)", best_conc, best_rps);
+                // Apply the winner for the remainder of this run.
+                {
+                    let mut st = state.lock().await;
+                    st.load_concurrency = best_conc;
+                }
+                stats.concurrency.store(best_conc, Ordering::Relaxed);
+            }
             tokio::spawn(run_load(state_clone.clone(), pool_clone, stats_clone, delay_ms, max_errors));
             tokio::spawn(listen_stdin(state_clone.clone()));
             tokio::spawn(ramp_up_concurrency(state_clone, concurrency, ramp_up_secs));
@@ -3263,6 +3351,16 @@ async fn main() {
             );
             if !quiet {
                 println!("  {}", final_stats);
+                // Per-status-code histogram (lock-free array indexed by code-100).
+                let mut hist_entries: Vec<(u16, u64)> = (100..=999)
+                    .map(|c| (c, stats.status_hist[c as usize - 100].load(Ordering::Relaxed)))
+                    .filter(|&(_, n)| n > 0)
+                    .collect();
+                hist_entries.sort_by(|a, b| b.1.cmp(&a.1));
+                if !hist_entries.is_empty() {
+                    let parts: Vec<String> = hist_entries.iter().map(|(c, n)| format!("{}:{}", c, n)).collect();
+                    println!("  Histogram: {}", parts.join("  "));
+                }
             }
             if let Some(ref log_path) = log_file {
                 if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
@@ -3343,6 +3441,7 @@ async fn main() {
                         
                       Status Codes:
                         2xx: {} | 3xx: {} | 4xx: {} | 5xx: {}
+                        {}
                         
                       Errors: {} total
                         Timeouts: {}
@@ -3358,6 +3457,20 @@ async fn main() {
                     stats.status_3xx.load(Ordering::Relaxed),
                     stats.status_4xx.load(Ordering::Relaxed),
                     stats.status_5xx.load(Ordering::Relaxed),
+                    {
+                        // Build a per-status-code histogram line from the lock-free array.
+                        let mut entries: Vec<(u16, u64)> = (100..=999)
+                            .map(|c| (c, stats.status_hist[c as usize - 100].load(Ordering::Relaxed)))
+                            .filter(|&(_, n)| n > 0)
+                            .collect();
+                        entries.sort_by(|a, b| b.1.cmp(&a.1));
+                        if entries.is_empty() {
+                            String::new()
+                        } else {
+                            let parts: Vec<String> = entries.iter().map(|(c, n)| format!("{}:{}", c, n)).collect();
+                            format!("                        Histogram: {}", parts.join("  "))
+                        }
+                    },
                     stats.errors.load(Ordering::Relaxed),
                     stats.error_timeout.load(Ordering::Relaxed),
                     stats.error_connect.load(Ordering::Relaxed),
@@ -3367,6 +3480,24 @@ async fn main() {
                     use std::io::Write;
                     let _ = file.write_all(report.as_bytes());
                     println!("  Report written to: {}", report_path);
+                }
+            }
+
+            // Per-circuit stats table (Tor mode): reqs + errors + error rate per circuit.
+            {
+                let guard = pool.lock().unwrap();
+                let m = guard.circuit_requests.lock().unwrap_or_else(|e| e.into_inner());
+                if !m.is_empty() {
+                    println!("\n  Per-circuit stats:");
+                    println!("    {:>4}  {:>10}  {:>9}  {:>8}", "circ", "requests", "errors", "err%");
+                    let mut idxs: Vec<usize> = m.keys().copied().collect();
+                    idxs.sort();
+                    for idx in idxs {
+                        let (reqs, errs) = m[&idx];
+                        let label = guard.labels.get(idx).map(|s: &String| s.as_str()).unwrap_or("?");
+                        let err_pct = if reqs > 0 { (errs as f64 / reqs as f64 * 100.0) } else { 0.0 };
+                        println!("    {:<4}  {:>10}  {:>9}  {:>7.1}%  {}", idx, reqs, errs, err_pct, label);
+                    }
                 }
             }
             
