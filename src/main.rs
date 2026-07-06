@@ -2452,7 +2452,7 @@ async fn main() {
                     let _ = CUSTOM_CONTENT_TYPE.set(val);
                 } else if other.starts_with('-') {
                     eprintln!("Unknown option: {}", other);
-                    std::process::exit(1);
+                    return;
                 } else {
                     positional.push(other.to_string());
                 }
