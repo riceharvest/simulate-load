@@ -1670,13 +1670,13 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
             let st = state.lock().await; (st.imgs.clone(), st.apis.clone(), st.statics.clone(), st.has_isr, st.has_cache_bypass, st.has_log_drains, st.has_storage)
         };
         tokio::task::yield_now().await;
-        let assets: Vec<String> = match attack {
+        let assets: Arc<Vec<String>> = Arc::new(match attack {
             AttackMode::Normal => { if statics_local.is_empty() { vec!["/".into()] } else { statics_local.clone() } },
             AttackMode::ImageOpt => { if imgs.is_empty() { vec!["/".into()] } else { imgs.clone() } },
             AttackMode::Ssr => { if apis_local.is_empty() { vec!["/".into()] } else { apis_local.clone() } },
             AttackMode::Middleware => { if statics_local.is_empty() { vec!["/".into()] } else { statics_local.clone() } },
             _ => vec!["/".into()]
-        };
+        });
 
         loop {
             if !stats.running.load(Ordering::Relaxed) { break; }
