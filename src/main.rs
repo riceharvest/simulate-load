@@ -3457,7 +3457,7 @@ mod tests {
         let sel = Selector::parse("table.table tbody tr").unwrap_or_else(|_| Selector::parse("#__simulate_load_never__").unwrap());
         let doc = scraper::Html::parse_document("<html><body><table class='table'><tbody><tr><td>1</td></tr></tbody></table></body></html>");
         assert_eq!(doc.select(&sel).count(), 1);
-        let fallback = Selector::parse("#__simulate_load_never__").unwrap();
+        let fallback = Selector::parse("#__simulate_load_never__").unwrap_or_else(|_| Selector::parse("#__simulate_load_never__").unwrap());
         let doc = scraper::Html::parse_document("<html><body><table class='table'><tbody><tr><td>1</td></tr></tbody></table></body></html>");
         assert_eq!(doc.select(&fallback).count(), 0);
     }
@@ -3484,7 +3484,7 @@ mod tests {
     fn scrape_html_custom_selector_no_proxies() {
         let html = "<html><body><div class='proxy'>no valid ip:port text</div></body></html>";
         let doc = scraper::Html::parse_document(html);
-        let sel = Selector::parse(".proxy").unwrap();
+        let sel = Selector::parse(".proxy").unwrap_or_else(|_| Selector::parse("#__simulate_load_never__").unwrap());
         let re = Regex::new(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)").unwrap_or_else(|_| Regex::new("$^").unwrap());
         let mut out = vec![];
         for el in doc.select(&sel) {
