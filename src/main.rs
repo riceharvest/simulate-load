@@ -116,7 +116,7 @@ impl Default for ClientConfig {
             sni: None,
             timeout: Duration::from_secs(10),
             max_redirects: 10,
-            tor_circuits: 100,
+            tor_circuits: 3,
             rate_limit: None,
             insecure: false,
             custom_user_agent: None,
@@ -242,7 +242,7 @@ fn print_help() {
     println!("  --log-file F          Append status updates to file");
     println!("  --canary              Run a canary health check before load test");
     println!("  --stats-interval S    Status update interval in seconds (default: 5)");
-    println!("  --tor-circuits N      Number of Tor circuits to use (default: 10)");
+    println!("  --tor-circuits N      Number of Tor circuits to use (default: 3)");
     println!("  --ramp-up S           Gradually increase concurrency from 1 to target over S seconds");
     println!("  --report FILE         Write detailed post-run report to file");
     println!("  --save-proxies F      Save discovered proxies to file");
@@ -1511,7 +1511,7 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
         ProxyMode::Tor => {
             state.lock().await.status_msg = "Checking Tor...".to_string();
             let ok = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect("127.0.0.1:9050")).await.ok().and_then(|r| r.ok()).is_some();
-            let n_unique = 3usize;
+            let n_unique = config.tor_circuits.max(1);
             if ok {
                 state.lock().await.status_msg = "Tor ready".to_string();
                 let mut proxies = Vec::with_capacity(n_unique);
@@ -2204,7 +2204,7 @@ async fn main() {
     let mut canary = false;
     let mut report_file: Option<String> = None;
     let mut stats_interval_secs: u64 = 5;
-    let mut tor_circuits: usize = 10;
+    let mut tor_circuits: usize = 3;
     let mut ramp_up_secs: u64 = 0;
     let mut request_timeout: u64 = 10;
 
