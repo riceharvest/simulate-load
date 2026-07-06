@@ -2404,7 +2404,7 @@ async fn main() {
             }
             "--tor-circuits" => {
                 if let Some(val) = args_iter.next() {
-                    tor_circuits = val.parse().unwrap_or(10);
+                    tor_circuits = val.parse().unwrap_or(3);
                 }
             }
             "--ramp-up" => {
@@ -2492,7 +2492,7 @@ async fn main() {
                 } else if other.starts_with("--stats-interval=") {
                     stats_interval_secs = other.strip_prefix("--stats-interval=").unwrap_or("").parse().unwrap_or(5);
                 } else if other.starts_with("--tor-circuits=") {
-                    tor_circuits = other.strip_prefix("--tor-circuits=").unwrap_or("").parse().unwrap_or(10);
+                    tor_circuits = other.strip_prefix("--tor-circuits=").unwrap_or("").parse().unwrap_or(3);
                 } else if other.starts_with("--ramp-up=") {
                     ramp_up_secs = other.strip_prefix("--ramp-up=").unwrap_or("").parse().unwrap_or(0);
                 } else if other.starts_with("--request-timeout=") {
@@ -3432,6 +3432,34 @@ mod tests {
     fn proxy_pool_next_empty_returns_none() {
         let mut pool = ProxyPool::new(&[], &default_test_config(), "weighted");
         assert!(pool.next().is_none());
+    }
+
+    #[test]
+    fn client_config_default_tor_circuits_is_three() {
+        // Regression: --tor-circuits parse-failure fallback and ClientConfig::default
+        // must agree. A stale `100`/`10` default would silently spawn far more
+        // circuits than the CLI advertised.
+        assert_eq!(ClientConfig::default().tor_circuits, 3);
+    }
+
+    #[test]
+    fn tor_isolated_pool_builds_one_client_per_circuit() {
+        // Regression for the --tor-circuits no-op bug: ProxyPool::new must expand a
+        // single Tor isolate template into exactly `tor_circuits` distinct isolated
+        // clients (tor0:isolate..torN-1:isolate). Passing the template N times must
+        // NOT inflate the count — the circuit count is driven by config.tor_circuits.
+        let isolates = vec!["socks5h://tor:isolate@127.0.0.1:9050".to_string()];
+        let n_circuits = 5usize;
+        let config = ClientConfig { tor_circuits: n_circuits, ..default_test_config() };
+        let pool = ProxyPool::new(&isolates, &config, "weighted");
+        assert_eq!(pool.clients.len(), n_circuits, "one isolated client per circuit");
+        // Distinct circuit labels prove they are not collapsed into a hard-coded set.
+        let mut seen = std::collections::HashSet::new();
+        for label in &pool.labels {
+            assert!(label.contains(":isolate@"), "label must be an isolated circuit: {label}");
+            seen.insert(label.clone());
+        }
+        assert_eq!(seen.len(), n_circuits, "each circuit label must be distinct");
     }
 
     fn rate_limit_delay_ms(rate: Option<u64>) -> u64 {
