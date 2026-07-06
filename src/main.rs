@@ -229,6 +229,7 @@ fn print_help() {
     println!("  --tor-ssthresh N      Limited slow start concurrency threshold (default: 20)");
     println!("  --delay MS            Per-request delay in milliseconds");
     println!("  --jitter MS           Random delay jitter in milliseconds");
+    println!("  --jitter-percent PCT  Scale jitter to PCT percent of per-request delay (0-100)");
     println!("  --max-errors N        Stop after N failed requests");
     println!("  --spoof-ip            Enable randomized IP spoofing headers (X-Forwarded-For, etc.)");
     println!("  --quiet               Quiet mode: suppress status updates during load test");
@@ -1068,7 +1069,7 @@ struct AppState {
     scrape_phase: u32, scrape_total: u32, tcp_checked: u32, tcp_total: u32,
     validated: u32, validation_total: u32, target_url: String,
     attack_mode: AttackMode, max_scrape: usize, load_concurrency: usize,
-    interval_ms: u64, jitter_ms: u64, tcp_concurrency: usize,
+    interval_ms: u64, jitter_ms: u64, jitter_percent: Option<u64>, tcp_concurrency: usize,
     rate_limit: Option<u64>,
     validate_concurrency: usize, validate_timeout_secs: u64,
     probe_status: String, has_image_opt: bool, has_api: bool, has_middleware: bool,
@@ -1091,7 +1092,7 @@ impl AppState {
         scrape_phase: 0, scrape_total: 0, tcp_checked: 0, tcp_total: 0,
         validated: 0, validation_total: 0, target_url: DEFAULT_TARGET_URL.to_string(),
         attack_mode: AttackMode::Normal, max_scrape: 100_000, load_concurrency: 20,
-        interval_ms: 10, jitter_ms: 50, tcp_concurrency: 500,
+        interval_ms: 10, jitter_ms: 50, jitter_percent: None, tcp_concurrency: 500,
         rate_limit: None,
         validate_concurrency: 500, validate_timeout_secs: 1,
         probe_status: "Not probed".to_string(), has_image_opt: false, has_api: false,
@@ -1593,9 +1594,9 @@ async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -> Option<Ve
 }
 
 async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyPool>>, stats: Stats, delay_ms: u64, max_errors: Option<u64>) {
-    let (mut conc, interval, attack, sessions, _, apis, _statics, rate_limit, verbose, max_retries) = {
+    let (mut conc, interval, attack, sessions, _, apis, _statics, rate_limit, verbose, max_retries, jitter_percent) = {
         let st = state.lock().await;
-        (st.load_concurrency, st.interval_ms, st.attack_mode, st.sessions.clone(), st.jitter_ms, st.apis.clone(), st.statics.clone(), st.rate_limit, st.verbose, st.max_retries)
+        (st.load_concurrency, st.interval_ms, st.attack_mode, st.sessions.clone(), st.jitter_ms, st.apis.clone(), st.statics.clone(), st.rate_limit, st.verbose, st.max_retries, st.jitter_percent)
     };
     let mut jitter_ms;
     let mut semaphore = Arc::new(Semaphore::new(conc));
@@ -1672,10 +1673,13 @@ async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyP
                 if req_delay == 0 {
                     req_delay = interval;
                 }
-                if jitter_ms > 0 {
+                let effective_jitter_ms = jitter_percent
+                    .map(|pct| req_delay * pct / 100)
+                    .unwrap_or(jitter_ms);
+                if effective_jitter_ms > 0 {
                     let mut rng = rand::rng();
-                    let min_d = req_delay.saturating_sub(jitter_ms);
-                    let max_d = req_delay.saturating_add(jitter_ms);
+                    let min_d = req_delay.saturating_sub(effective_jitter_ms);
+                    let max_d = req_delay.saturating_add(effective_jitter_ms);
                     req_delay = rng.random_range(min_d..=max_d);
                 }
 
@@ -2185,6 +2189,7 @@ async fn main() {
     let mut sni: Option<String> = None;
     let mut user_agent: Option<String> = None;
     let mut jitter_ms = 0u64;
+    let mut jitter_percent: Option<u64> = None;
     let mut auto_tune = false;
     let mut tui = false;
     let mut insecure = false;
@@ -2310,6 +2315,12 @@ async fn main() {
                     jitter_ms = val.parse().unwrap_or(0);
                 }
             }
+            "--jitter-percent" => {
+                if let Some(val) = args_iter.next() {
+                    let parsed: i64 = val.parse().unwrap_or(0);
+                    jitter_percent = Some(parsed.clamp(0, 100) as u64);
+                }
+            }
             "--auto-tune" => auto_tune = true,
             "--tui" => tui = true,
             "--insecure" => insecure = true,
@@ -2414,6 +2425,9 @@ async fn main() {
                     sni = Some(other.strip_prefix("--sni=").unwrap_or("").to_string());
                 } else if other.starts_with("--jitter=") {
                     jitter_ms = other.strip_prefix("--jitter=").unwrap_or("").parse().unwrap_or(0);
+                } else if other.starts_with("--jitter-percent=") {
+                    let parsed: i64 = other.strip_prefix("--jitter-percent=").unwrap_or("").parse().unwrap_or(0);
+                    jitter_percent = Some(parsed.clamp(0, 100) as u64);
                 } else if other == "--auto-tune" {
                     auto_tune = true;
                 } else if other == "--tui" {
@@ -2697,6 +2711,7 @@ async fn main() {
         st.target_url = target_url.to_string();
         st.load_concurrency = concurrency;
         st.jitter_ms = jitter_ms;
+        st.jitter_percent = jitter_percent;
         st.custom_selector = custom_selector.clone();
         st.client_config = config.clone();
         st.tor_proxy = tor_proxy.clone();
@@ -3929,5 +3944,86 @@ mod tests {
         }
         // Either the env var is unset (default 10) or set to a valid value (>=1, <=300).
         assert!((1..=300).contains(&request_timeout));
+    }
+
+    fn parse_jitter_percent(args: &[&str]) -> Option<u64> {
+        let mut jitter_percent: Option<u64> = None;
+        let mut iter = args.iter().copied();
+        while let Some(arg) = iter.next() {
+            match arg {
+                "--jitter-percent" => {
+                    if let Some(val) = iter.next() {
+                        let parsed: i64 = val.parse().unwrap_or(0);
+                        jitter_percent = Some(parsed.clamp(0, 100) as u64);
+                    }
+                }
+                _ => {
+                    if let Some(val) = arg.strip_prefix("--jitter-percent=") {
+                        let parsed: i64 = val.parse().unwrap_or(0);
+                        jitter_percent = Some(parsed.clamp(0, 100) as u64);
+                    }
+                }
+            }
+        }
+        jitter_percent
+    }
+
+    fn compute_effective_jitter(req_delay: u64, jitter_ms: u64, jitter_percent: Option<u64>) -> u64 {
+        jitter_percent.map(|pct| req_delay * pct / 100).unwrap_or(jitter_ms)
+    }
+
+    #[test]
+    fn jitter_percent_default_is_none() {
+        assert_eq!(parse_jitter_percent(&[]), None);
+    }
+
+    #[test]
+    fn jitter_percent_parsed_space() {
+        assert_eq!(parse_jitter_percent(&["--jitter-percent", "10"]), Some(10));
+    }
+
+    #[test]
+    fn jitter_percent_parsed_equals() {
+        assert_eq!(parse_jitter_percent(&["--jitter-percent=25"]), Some(25));
+    }
+
+    #[test]
+    fn jitter_percent_clamps_negative_to_zero() {
+        assert_eq!(parse_jitter_percent(&["--jitter-percent=-5"]), Some(0));
+    }
+
+    #[test]
+    fn jitter_percent_clamps_over_hundred_to_hundred() {
+        assert_eq!(parse_jitter_percent(&["--jitter-percent=150"]), Some(100));
+    }
+
+    #[test]
+    fn jitter_percent_overrides_fixed_jitter() {
+        // Fixed jitter of 50ms is overridden by 10% of 100ms delay -> 10ms.
+        assert_eq!(compute_effective_jitter(100, 50, Some(10)), 10);
+    }
+
+    #[test]
+    fn jitter_percent_none_uses_fixed_jitter() {
+        assert_eq!(compute_effective_jitter(100, 50, None), 50);
+    }
+
+    #[test]
+    fn jitter_percent_zero_produces_no_jitter() {
+        assert_eq!(compute_effective_jitter(100, 50, Some(0)), 0);
+    }
+
+    #[test]
+    fn jitter_percent_deterministic_range() {
+        // With a 100ms delay and 10% jitter, the jitter magnitude is exactly 10ms.
+        let req_delay = 100u64;
+        let pct = 10u64;
+        let jitter = compute_effective_jitter(req_delay, 0, Some(pct));
+        assert_eq!(jitter, 10);
+        // The resulting delay range is deterministic: [90, 110].
+        let min_d = req_delay.saturating_sub(jitter);
+        let max_d = req_delay.saturating_add(jitter);
+        assert_eq!(min_d, 90);
+        assert_eq!(max_d, 110);
     }
 }
