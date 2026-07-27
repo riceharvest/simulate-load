@@ -390,6 +390,7 @@ fn browser_client_builder(config: &ClientConfig) -> reqwest::ClientBuilder {
 mod types;
 mod catalog;
 mod gui;
+mod tcp;
 use crate::types::*;
 
 struct ProxyPool {
@@ -3614,6 +3615,7 @@ async fn main() {
     let mut jitter_percent: Option<u64> = None;
     let mut auto_tune = false;
     let mut tui = false;
+    let mut protocol = String::from("http");
     let mut insecure = false;
     let mut spoof_ip = false;
     let mut quiet = false;
@@ -3746,6 +3748,11 @@ async fn main() {
             }
             "--auto-tune" => auto_tune = true,
             "--tui" => tui = true,
+            "--protocol" => {
+                if let Some(val) = args_iter.next() {
+                    protocol = val;
+                }
+            }
             "--gui" => {
                 match gui::GuiApp::new().run() {
                     Ok(_) => return,
@@ -3996,6 +4003,20 @@ async fn main() {
         } else {
             eprintln!("  Warning: Config file {} not found or unreadable.", path);
         }
+    }
+
+    // TCP protocol dispatch — bypasses all HTTP infrastructure
+    if protocol == "tcp" {
+        let target = positional.first().cloned().unwrap_or_else(|| "127.0.0.1".to_string());
+        let tcp_mode_str = positional.get(1).cloned().unwrap_or_else(|| "generic".to_string());
+        let tcp_concurrency: usize = positional.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
+        let tcp_duration: u64 = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(30);
+
+        let tcp_mode = tcp::TcpMode::from_str(&tcp_mode_str)
+            .unwrap_or(tcp::TcpMode::GenericConnect);
+
+        tcp::run_tcp_load(tcp_mode, &target, tor_proxy.clone(), tcp_concurrency, tcp_duration).await;
+        return;
     }
 
     if spoof_ip {

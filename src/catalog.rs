@@ -690,7 +690,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "2-10x per command",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -703,7 +703,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "1-5x per recipient",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -729,7 +729,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "5-20x CPU per attempt",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -742,7 +742,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "50-200x CPU per connection",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -755,7 +755,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "1-10x per bounce",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -768,7 +768,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "5-50x response/request ratio",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -781,7 +781,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "2-5x per negotiation",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -794,7 +794,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "5-15x per login attempt",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -885,7 +885,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "50-200x CPU amplification",
         needs_root: false,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -911,7 +911,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "2-5x per query",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     // ================================================================
