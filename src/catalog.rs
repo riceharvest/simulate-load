@@ -716,7 +716,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "5-50x storage amplification",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -807,7 +807,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "3-10x per attempt",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -820,7 +820,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "5-30x per search",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -833,7 +833,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "3-10x per connection",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -846,7 +846,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "10-30x per stream",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -859,7 +859,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "5-20x per request",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -872,7 +872,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "1-3x per request (process disruption)",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -898,7 +898,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "2-5x per connection",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {

