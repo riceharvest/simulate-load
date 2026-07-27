@@ -4045,8 +4045,14 @@ async fn main() {
             "netbios" | "netbios-ns" => udp::UdpMode::NetbiosNs,
             "mdns" | "mdns-query" => udp::UdpMode::MdnsQuery,
             "tftp" | "tftp-read" => udp::UdpMode::TftpRead,
+            "sip" | "sip-options" => udp::UdpMode::SipOptions,
+            "ike" | "ike-amplification" | "isakmp" => udp::UdpMode::IkeAmplification,
+            "rip" | "rip-query" | "ripv1" => udp::UdpMode::RipQuery,
+            "bacnet" | "bacnet-discovery" | "bacnet-device" => udp::UdpMode::BacnetDiscovery,
+            "ntp-readvar" | "ntpreadvar" => udp::UdpMode::NtpReadVar,
+            "dns-dnssec" | "dnssec" | "dnssec-query" => udp::UdpMode::DnsDnssec,
             _ => {
-                eprintln!("Unknown UDP amplification mode: {}. Available: dns-any, dns-ixfr, ntp-monlist, ntp-query, memcached, memcached-get, ssdp, snmp-getbulk, chargen, qotd, generic, cldap, coap, ws-discovery, portmap, netbios, mdns, tftp", udp_mode_str);
+                eprintln!("Unknown UDP amplification mode: {}. Available: dns-any, dns-ixfr, ntp-monlist, ntp-query, memcached, memcached-get, ssdp, snmp-getbulk, chargen, qotd, generic, cldap, coap, ws-discovery, portmap, netbios, mdns, tftp, sip, ike, rip, bacnet, ntp-readvar, dnssec", udp_mode_str);
                 return;
             }
         };
