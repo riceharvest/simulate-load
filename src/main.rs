@@ -4038,8 +4038,15 @@ async fn main() {
             "qotd" => udp::UdpMode::Qotd,
             "memcached-get" | "memcache-get" => udp::UdpMode::MemcachedGet,
             "generic" | "udpconnect" => udp::UdpMode::GenericUdp,
+            "cldap" | "cldap-search" => udp::UdpMode::CldapSearch,
+            "coap" | "coap-amplification" => udp::UdpMode::CoapAmplification,
+            "ws-discovery" | "wsd" => udp::UdpMode::WsDiscovery,
+            "portmap" | "portmap-dump" | "rpcbind" => udp::UdpMode::PortmapDump,
+            "netbios" | "netbios-ns" => udp::UdpMode::NetbiosNs,
+            "mdns" | "mdns-query" => udp::UdpMode::MdnsQuery,
+            "tftp" | "tftp-read" => udp::UdpMode::TftpRead,
             _ => {
-                eprintln!("Unknown UDP amplification mode: {}. Available: dns-any, dns-ixfr, ntp-monlist, ntp-query, memcached, memcached-get, ssdp, snmp-getbulk, chargen, qotd, generic", udp_mode_str);
+                eprintln!("Unknown UDP amplification mode: {}. Available: dns-any, dns-ixfr, ntp-monlist, ntp-query, memcached, memcached-get, ssdp, snmp-getbulk, chargen, qotd, generic, cldap, coap, ws-discovery, portmap, netbios, mdns, tftp", udp_mode_str);
                 return;
             }
         };

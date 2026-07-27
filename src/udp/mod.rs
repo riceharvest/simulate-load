@@ -13,6 +13,13 @@ pub enum UdpMode {
     SnmpGetBulk,
     CharGen,
     Qotd,
+    CldapSearch,
+    CoapAmplification,
+    WsDiscovery,
+    PortmapDump,
+    NetbiosNs,
+    MdnsQuery,
+    TftpRead,
     GenericUdp,
 }
 
@@ -29,6 +36,13 @@ impl UdpMode {
             UdpMode::SnmpGetBulk => "SNMP getbulk amplification",
             UdpMode::CharGen => "CharGen amplification",
             UdpMode::Qotd => "QOTD amplification",
+            UdpMode::CldapSearch => "CLDAP search amplification",
+            UdpMode::CoapAmplification => "CoAP amplification",
+            UdpMode::WsDiscovery => "WS-Discovery amplification",
+            UdpMode::PortmapDump => "Portmap/RPCbind dump",
+            UdpMode::NetbiosNs => "NetBIOS Name Service query",
+            UdpMode::MdnsQuery => "mDNS query",
+            UdpMode::TftpRead => "TFTP read request",
             UdpMode::GenericUdp => "UDP datagram flood",
         }
     }
@@ -42,6 +56,13 @@ impl UdpMode {
             UdpMode::SnmpGetBulk => 161,
             UdpMode::CharGen => 19,
             UdpMode::Qotd => 17,
+            UdpMode::CldapSearch => 389,
+            UdpMode::CoapAmplification => 5683,
+            UdpMode::WsDiscovery => 3702,
+            UdpMode::PortmapDump => 111,
+            UdpMode::NetbiosNs => 137,
+            UdpMode::MdnsQuery => 5353,
+            UdpMode::TftpRead => 69,
             UdpMode::GenericUdp => 12345,
         }
     }
@@ -58,6 +79,13 @@ impl UdpMode {
             "snmp" => Some(UdpMode::SnmpGetBulk),
             "chargen" => Some(UdpMode::CharGen),
             "qotd" => Some(UdpMode::Qotd),
+            "cldap" | "cldap-search" => Some(UdpMode::CldapSearch),
+            "coap" | "coap-amplification" => Some(UdpMode::CoapAmplification),
+            "ws-discovery" | "wsd" => Some(UdpMode::WsDiscovery),
+            "portmap" | "portmap-dump" | "rpcbind" => Some(UdpMode::PortmapDump),
+            "netbios" | "netbios-ns" => Some(UdpMode::NetbiosNs),
+            "mdns" | "mdns-query" => Some(UdpMode::MdnsQuery),
+            "tftp" | "tftp-read" => Some(UdpMode::TftpRead),
             "udp-generic" | "generic" => Some(UdpMode::GenericUdp),
             _ => None,
         }
@@ -396,6 +424,13 @@ async fn run_udp_protocol(mode: UdpMode, host: &str, port: u16) -> Result<(usize
         UdpMode::SnmpGetBulk => build_snmp_getbulk(),
         UdpMode::CharGen => build_chargen(),
         UdpMode::Qotd => build_qotd(),
+        UdpMode::CldapSearch => build_cldap_search(),
+        UdpMode::CoapAmplification => build_coap_request(),
+        UdpMode::WsDiscovery => build_ws_discovery(),
+        UdpMode::PortmapDump => build_portmap_dump(),
+        UdpMode::NetbiosNs => build_netbios_ns(),
+        UdpMode::MdnsQuery => build_mdns_query(),
+        UdpMode::TftpRead => build_tftp_read(),
         UdpMode::GenericUdp => {
             // Send a small datagram, read what comes back
             let sent = socket.send_to(b"hello", &target_addr)
@@ -519,4 +554,278 @@ pub async fn run_udp_load(
     println!("Received:       {} bytes ({} KB)", total_recv, total_recv / 1024);
     println!("Amplification:  {:.1}x", amp_ratio);
     println!("Rate:           {:.0} req/s", total_requests as f64 / elapsed as f64);
+}
+
+// ================================================================
+// CLDAP (Connectionless LDAP) search request /389
+// Sends a LDAP search over UDP — server responds with directory data
+// Amplification: 40-60x
+// ================================================================
+fn build_cldap_search() -> Vec<u8> {
+    // LDAP search request packed in BER for UDP (connectionless)
+    // MessageID = 1, SearchRequest for rootDSE
+    // Filter: (objectClass=*) requesting all attributes
+    //
+    // Format: SEQUENCE { messageID, protocolOp CHOICE { searchRequest } }
+    // We build the inner SEQUENCE manually.
+    let mut msg = Vec::new();
+
+    // MessageID: INTEGER 1 (2 bytes + tag + length)
+    msg.push(0x02); // INTEGER tag
+    msg.push(0x01); // length 1
+    msg.push(0x01); // value 1
+
+    // SearchRequest tag (0x63 = APPLICATION 3, constructed)
+    // Base object: empty = rootDSE
+    // Scope: 0 = baseObject
+    // Deref: 0
+    // SizeLimit: 0 (unlimited)
+    // TimeLimit: 0 (unlimited)
+    // TypesOnly: false
+    // Filter: (objectClass=*)  — equality match with present value
+    // Attributes: all (empty list)
+    let filter_presence = vec![0x87, 0x0b, 0x6f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x43, 0x6c, 0x61, 0x73, 0x73]; // (objectClass=*) using present filter
+
+    let mut search = Vec::new();
+    // baseObject (empty)
+    search.push(0x04); // OCTET STRING
+    search.push(0x00);
+    // scope: ENUMERATED 0 (baseObject)
+    search.push(0x0a); // ENUMERATED
+    search.push(0x01);
+    search.push(0x00);
+    // derefAliases: ENUMERATED 0
+    search.push(0x0a);
+    search.push(0x01);
+    search.push(0x00);
+    // sizeLimit: INTEGER 0
+    search.push(0x02);
+    search.push(0x01);
+    search.push(0x00);
+    // timeLimit: INTEGER 0
+    search.push(0x02);
+    search.push(0x01);
+    search.push(0x00);
+    // typesOnly: BOOLEAN false
+    search.push(0x01);
+    search.push(0x01);
+    search.push(0x00);
+    // filter — use present filter (objectClass=*)
+    search.extend_from_slice(&filter_presence);
+    // attributes: empty list = all attributes
+    search.push(0x30); // SEQUENCE
+    search.push(0x00);
+
+    // Tag the search request as APPLICATION 3 (0x63)
+    let mut search_tagged = vec![0x63, (search.len() & 0xff) as u8];
+    search_tagged.extend_from_slice(&search);
+
+    // Final SEQUENCE wrapping messageID + searchRequest
+    let mut final_seq = vec![0x30];
+    let body_len = msg.len() + search_tagged.len();
+    final_seq.push(body_len as u8);
+    final_seq.extend_from_slice(&msg);
+    final_seq.extend_from_slice(&search_tagged);
+
+    final_seq
+}
+
+// ================================================================
+// CoAP (Constrained Application Protocol) GET request /5683
+// Requests large resource representation from IoT devices
+// Amplification: 20-50x
+// ================================================================
+fn build_coap_request() -> Vec<u8> {
+    // CoAP v1 CON GET with large Accept option
+    // Requesting ".well-known/core" with ?large query
+    // Format: Version(2), Type(0=CON), TokenLen, Code(0.01=GET), MsgID
+    // + Options + Payload marker
+    let mut pkt = Vec::new();
+
+    // First byte: Version=01 (bits 6-7), Type=00 (CON, bits 4-5), TokenLen=0 (bits 0-3)
+    pkt.push(0x40); // v1, CON, no token
+    // Code: 0.01 = GET (0x01)
+    pkt.push(0x01);
+    // Message ID
+    let msg_id: u16 = rand::random();
+    pkt.extend_from_slice(&msg_id.to_be_bytes());
+
+    // Uri-Path option: ".well-known"
+    // Option delta=11 (Uri-Path), length=10
+    pkt.push((11 << 4) | 10); // delta=11, len=10
+    pkt.extend_from_slice(b".well-known");
+    // Uri-Path option: "core" (delta=0 since same option, length=4)
+    pkt.push(0x04);
+    pkt.extend_from_slice(b"core");
+    // Uri-Query option: "large" to trigger larger response
+    pkt.push((15 << 4) | 5); // delta=15 (Uri-Query), len=5
+    pkt.extend_from_slice(b"large");
+
+    pkt
+}
+
+// ================================================================
+// WS-Discovery Probe /3702 — SOAP/XML multicast request
+// Each UPnP/WS-D device responds with full device description XML
+// Amplification: 25-100x
+// ================================================================
+fn build_ws_discovery() -> Vec<u8> {
+    // WS-Discovery Probe message (SOAP over UDP)
+    // Request probing for all target types
+    let msg = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+<soap:Envelope xmlns:soap=\"http://www.w3.org/2003/05/soap-envelope\" \
+xmlns:wsa=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" \
+xmlns:wsd=\"http://schemas.xmlsoap.org/ws/2005/04/discovery\" \
+xmlns:wsdp=\"http://schemas.xmlsoap.org/ws/2006/02/devprof\">\
+<soap:Header>\
+<wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>\
+<wsa:MessageID>uuid:00000000-0000-0000-0000-000000000000</wsa:MessageID>\
+<wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>\
+</soap:Header>\
+<soap:Body>\
+<wsd:Probe>\
+<wsd:Types>wsdp:Device</wsd:Types>\
+</wsd:Probe>\
+</soap:Body>\
+</soap:Envelope>";
+    msg.to_vec()
+}
+
+// ================================================================
+// Portmap (RPCbind) DUMP /111 — requests list of all registered RPC services
+// Response can be very large on NFS servers with many services
+// Amplification: 7-28x
+// ================================================================
+fn build_portmap_dump() -> Vec<u8> {
+    // RPCv2 NULL procedure call to portmap, followed by PMAPPROC_DUMP
+    // ONC RPC header + Portmap DUMP request
+    let mut pkt = Vec::new();
+
+    // RPC header (28 bytes)
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // XID
+    // CALL (0), RPCv2 (2), PROG=100000 (portmap), VER=4, PROC=4 (PMAPPROC_DUMP)
+    pkt.extend_from_slice(&[
+        0x00, 0x00, 0x00, 0x00, // msg_type = CALL
+        0x00, 0x00, 0x00, 0x02, // RPC version = 2
+        0x00, 0x01, 0x86, 0xA0, // program = 100000 (portmapper)
+        0x00, 0x00, 0x00, 0x04, // version = 4
+        0x00, 0x00, 0x00, 0x04, // procedure = 4 (DUMP)
+    ]);
+    // Auth: AUTH_NONE (flavor=0, length=0)
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    // Verifier: AUTH_NONE
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    // No additional parameters for PMAPPROC_DUMP
+
+    pkt
+}
+
+// ================================================================
+// NetBIOS Name Service status query /137
+// Requests the list of all names registered by a NetBIOS node
+// Response includes all service names, MAC, and adapter status
+// Amplification: 3-5x
+// ================================================================
+fn build_netbios_ns() -> Vec<u8> {
+    // NetBIOS Name Service NBSTAT request (name query for *<00>)
+    // Transaction ID (2), Flags (2), Questions (2), AnswerRR (2),
+    // AuthorityRR (2), AdditionalRR (2), Queries...
+    let mut pkt = Vec::new();
+    // Transaction ID
+    let tid: u16 = rand::random();
+    pkt.extend_from_slice(&tid.to_be_bytes());
+    // Flags: 0x0110 = request, broadcast, recursion desired
+    pkt.extend_from_slice(&[0x01, 0x10]);
+    // QDCOUNT: 1
+    pkt.extend_from_slice(&[0x00, 0x01]);
+    // ANCOUNT, NSCOUNT, ARCOUNT: 0
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+    // Query: Name = *<00> (all names), type = NBSTAT (0x21), class = IN
+    // NetBIOS name encoded as 32-byte first-level encoding
+    // Name: *<00> → pad to 16 bytes with spaces, then 32-byte encoded
+    let raw_name = b"*              \x00"; // 16 bytes: * + 14 spaces + type 0x00
+    let mut encoded = vec![0x20]; // length prefix (32 nybbles)
+    for b in raw_name.iter() {
+        encoded.push((b >> 4) + 0x41); // high nybble
+        encoded.push((b & 0x0f) + 0x41); // low nybble
+    }
+    pkt.extend_from_slice(&encoded);
+    // Name type: NBSTAT (0x21)
+    pkt.extend_from_slice(&[0x00, 0x21]);
+    // Class: IN (0x0001)
+    pkt.extend_from_slice(&[0x00, 0x01]);
+
+    pkt
+}
+
+// ================================================================
+// mDNS query /5353 — Multicast DNS ANY query
+// Requests all record types for a service type
+// Amplification: 2-10x
+// ================================================================
+fn build_mdns_query() -> Vec<u8> {
+    // mDNS query for _services._dns-sd._udp.local ANY
+    // Standard DNS query format but with:
+    // - Source port 5353
+    // - Response expected via multicast or unicast
+    let mut pkt = Vec::new();
+    // Transaction ID = 0 (mDNS uses 0)
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    // Flags: standard query (0x0000) + RD=0
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    // QDCOUNT: 1
+    pkt.extend_from_slice(&[0x00, 0x01]);
+    // ANCOUNT, NSCOUNT, ARCOUNT: 0
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+    // Name: _services._dns-sd._udp.local
+    let labels: &[&[u8]] = &[
+        b"\x0a_services",
+        b"\x07_dns-sd",
+        b"\x04_udp",
+        b"\x05local",
+    ];
+    for label in labels {
+        pkt.extend_from_slice(*label);
+    }
+    pkt.push(0x00); // root
+    // QTYPE: ANY (255)
+    pkt.extend_from_slice(&[0x00, 0xFF]);
+    // QCLASS: IN (1) + unicast-response flag (0x8000)
+    pkt.extend_from_slice(&[0x80, 0x01]);
+
+    pkt
+}
+
+// ================================================================
+// TFTP Read Request /69 — requests a file, server sends data blocks
+// Large filename can trigger larger responses via option negotiation
+// Amplification: 2-4x
+// ================================================================
+fn build_tftp_read() -> Vec<u8> {
+    // TFTP RRQ (Read Request) packet
+    // Opcode (2 bytes) + Filename (string) + 0 + Mode (string) + 0
+    // + optional options (blksize, tsize)
+    let mut pkt = Vec::new();
+    // Opcode: 1 = RRQ
+    pkt.extend_from_slice(&[0x00, 0x01]);
+    // Filename (large to trigger bigger response via option negotiation)
+    pkt.extend_from_slice(b"bootstrap.img");
+    pkt.push(0x00);
+    // Mode: octet (binary)
+    pkt.extend_from_slice(b"octet");
+    pkt.push(0x00);
+    // Options: blksize 8192 (request larger blocks)
+    pkt.extend_from_slice(b"blksize");
+    pkt.push(0x00);
+    pkt.extend_from_slice(b"8192");
+    pkt.push(0x00);
+    // Option: tsize 0 (ask for file size, triggers server to stat file)
+    pkt.extend_from_slice(b"tsize");
+    pkt.push(0x00);
+    pkt.extend_from_slice(b"0");
+    pkt.push(0x00);
+
+    pkt
 }

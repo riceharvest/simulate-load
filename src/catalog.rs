@@ -1031,7 +1031,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "40-60x",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1057,7 +1057,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "20-50x",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1070,7 +1070,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "2-10x per device",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1083,7 +1083,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "3-5x",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1096,7 +1096,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "7-28x",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1109,7 +1109,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "2-4x",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1148,7 +1148,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "25-100x",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
