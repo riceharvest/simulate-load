@@ -124,6 +124,45 @@ use crate::types::*;
 use crate::http::*;
 use crate::support::*;
 
+fn print_list_modes() {
+    use crate::catalog::METHODS;
+
+    let mut by_layer: Vec<(&'static str, Vec<&'static crate::catalog::AmplificationMethod>)> = Vec::new();
+    let mut seen = Vec::new();
+    for m in METHODS.iter() {
+        let name = m.layer.name();
+        if !seen.contains(&name) {
+            seen.push(name);
+            by_layer.push((name, Vec::new()));
+        }
+    }
+    for m in METHODS.iter() {
+        if let Some(pos) = by_layer.iter().position(|(ln, _)| *ln == m.layer.name()) {
+            by_layer[pos].1.push(m);
+        }
+    }
+
+    println!("Available attack modes ({} total, {} implemented, {} not yet):",
+        METHODS.len(),
+        METHODS.iter().filter(|m| m.is_implemented).count(),
+        METHODS.iter().filter(|m| !m.is_implemented).count());
+    println!();
+
+    for (layer_name, methods) in &by_layer {
+        println!("--- {} ---", layer_name);
+        for m in methods {
+            let check = if m.is_implemented { "*" } else { " " };
+            println!("  {} {} [{}:{}]  ampl={}{}", check, m.id, m.transport.name(), m.port, m.ampl_factor,
+                if m.needs_root { " (root)" } else { "" });
+        }
+        println!();
+    }
+    println!("Use --protocol tcp <host:port> <mode> <concurrency> <duration> for TCP modes.");
+    println!("Use --protocol udp <host:port> <mode> <concurrency> <duration> for UDP modes.");
+    println!("Pass mode by its id (shown above). HTTP modes use the id directly as the mode argument.");
+}
+
+
 
 
 #[tokio::main]
@@ -134,7 +173,6 @@ async fn main() {
     let mut dry_run = false;
     let mut verify = false;
     let mut version = false;
-    let mut list_modes = false;
     let mut save_proxies: Option<String> = None;
     let mut output_csv: Option<String> = None;
     let mut proxy_file: Option<String> = None;
@@ -186,7 +224,10 @@ async fn main() {
                 return;
             }
             "-v" | "--version" => version = true,
-            "--list-modes" => list_modes = true,
+            "--list-modes" => {
+                print_list_modes();
+                return;
+            }
             "--tor-only" => tor_only = true,
             "--verify" => verify = true,
             "--dry-run" => dry_run = true,
@@ -631,108 +672,9 @@ async fn main() {
         println!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return;
     }
-    if list_modes {
-        println!("Attack modes:");
-        println!("  normal        Standard HTTP GET requests with human-like referer trail");
-        println!("  bandwidth     Heavy bandwidth consumption");
-        println!("  slowread      Slow read (deliberate slow download)");
-        println!("  imageopt      Image optimization endpoints");
-        println!("  largepost     Large JSON/POST requests with payload templates");
-        println!("  assetspray    Spray all static assets");
-        println!("  rangereq      Range header requests");
-        println!("  cookiebomb    Cookie bomb (many cookies)");
-        println!("  ssr           Server-side rendering endpoints");
-        println!("  middleware    Middleware/edge endpoint stress");
-        println!("  requestflood  No-delay request flood");
-        println!("  notfound      404 storm (nonexistent paths)");
-        println!("  slowloris     Slow POST/Slowloris stream connection exhaust");
-    println!("  headerbomb    Many headers (100+ headers per request)");
-    println!("  queryflood    100+ query parameters per request");
-    println!("  deeppath      Deep path traversal (long nested paths)");
-    println!("  authflood     Auth header variants (Basic, Bearer, Digest)");
-    println!("  cachebypass   Cache-bypass headers (Pragma: no-cache, Cache-Control)");
-    println!("  formmulti     Multi-part form data with many fields");
-    println!("  xmlbomb       XML bomb (Billion Laughs, Quadratic Blowup)");
-    println!("  graphqlflood  GraphQL query flood (complex nested queries)");
-    println!("  redirectloop  Redirect loop detection (Location: self)");
-    println!("  emptybody     POST with empty body and Content-Length: 0");
-    println!("  chunkedflood  Chunked Transfer-Encoding flood");
-    println!("  trailheaders  Trailing headers in chunked transfer");
-    println!("  connectionclose Connection: close (disable keep-alive)");
-    println!("  expect100     Expect: 100-continue (wait for server handshake)");
-    println!("  varyflood     Vary header variants (compression negotiation)");
-    println!("  deflatebomb   Deflate/decompression bomb (small payload, large output)");
-    println!("  traceamplify  TRACE method amplification");
-    println!("  hostpoison    Host header poisoning (different host values)");
-    println!("  conditionalflood Conditional header flood (If-Modified-Since, If-None-Match)");
-    println!("  corsflood     CORS header variations (Origin: null, *, custom)");
-    println!("  putflood      PUT requests with body data");
-    println!("  deleteflood   DELETE method requests");
-    println!("  sessionflood  Session cookie variations (session_id, sid, PHPSESSID)");
-    println!("  contenttypeflood Content-Type header variations (JSON, XML, form, multipart)");
-    println!("  upgradeamplify Upgrade/WebSocket header amplification");
-    println!("  headflood     HEAD method requests");
-    println!("  optionsflood  OPTIONS method (CORS preflight)");
-    println!("  patchflood    PATCH method with body");
-    println!("  slowpost      Slow POST (slow body transmission)");
-    println!("  jsonbomb      Deeply nested JSON bomb");
-    println!("  contentnegotiate Content-Type Accept headers negotiation flood");
-    println!("  preferflood   Prefer header variants (respond-async, wait, handling)");
-    println!("  rangeoverlap  Overlapping byte ranges (Range: bytes=0-0, -1, 0-100)");
-    println!("  multipost     Multi-tab POST (same payload, many concurrent)");
-    println!("  cspreports    CSP violation report endpoint flood");
-    println!("  connectflood  CONNECT method proxy tunnel requests");
-    println!("  keepaliveflood Keep-Alive connection persistence stress");
-    println!("  linkflood     Link header preload/preconnect hints flood");
-    println!("  forwardedflood X-Forwarded-For/Forwarded header chain flood");
-    println!("  healthflood   Health/status endpoint probing (/health, /readyz, /livez)");
-    println!("  jwtexplode    Large JWT Bearer token (signature verification stress)");
-    println!("  uploadflood   Large multipart file upload (64KB binary payload)");
-    println!("  graphqlintrospect GraphQL introspection query (deeply nested fragments)");
-    println!("  adminflood    Admin/panel endpoint probing");
-    println!("  paramflood    100+ query parameters per request (parsing allocation stress)");
-    println!("  teflood       TE request header (trailers, deflate, gzip — proxy processing)");
-    println!("  wantdigestflood Want-Digest header (SHA-256/SHA-512 content digest)");
-    println!("  savedataflood Save-Data: on header (low bandwidth mode)");
-    println!("  secfetchflood Sec-Fetch-* header policy evaluation flood");
-    println!("  csvbomb       CSV injection (formula command injection payload)");
-    println!("  serializedbomb Java serialized object deserialization bomb");
-    println!("  wellknownflood .well-known endpoint probing (webfinger, security.txt)");
-    println!("  swaggerflood  Swagger/OpenAPI docs endpoint probing");
-    println!("  loginflood    Login/auth endpoint brute force probing");
-    println!("  methodoverrideflood X-HTTP-Method-Override header method smuggling");
-    println!("  cookiebomb2    Large-value cookies (10 x 4KB each — header size amplification)");
-    println!("  graphqlbatch   Batch GraphQL queries (50 queries in one POST)");
-    println!("  webhookflood   Webhook/hook/callback endpoint probing");
-    println!("  apiversionflood API version path probing (/v1, /v2, /api/v1)");
-    println!("  prototypeflood Prototype pollution in query params (__proto__, constructor)");
-    println!("  jsonpflood     JSONP callback parameter probe (?callback=)");
-    println!("  arrayflood     Array notation params (a[]=1&a[]=2&...)");
-    println!("  sitemapflood   /sitemap.xml, /robots.txt, /feed.xml probing");
-    println!("  unicodeflood   Overlong UTF-8 / null byte / BOM in URL path");
-    println!("  paramduplicate Duplicate param names (a=1&a=2&a=3&...)
-  cachebusterflood Random cache-busting ?cb=HEX on each request (forces origin)
-  fileenumflood    Common file name probing (backup.sql, config.php, .env)
-  soapflood        SOAP/XML-RPC envelope POST with XML action header
-  signedheaderflood AWS-style Authorization: AWS4-HMAC-SHA256 ***
-  utf8bomflood     UTF-8 BOM in POST body (some parsers mis-handle this)
-  doubledotflood   Path traversal sequences (..;/..;/..;/etc/)
-  emptyparamflood  Empty/naked query params (?&&key&&&=)
-  headerorderflood Same headers in varying order (header normalization overhead)
-  crossdomainflood Cross-domain policy probing (/crossdomain.xml, /clientaccesspolicy.xml)
-  refererflood     Varying Referer headers to trigger referer-based processing
-  cachebusterflood Random cache-busting ?cb=HEX on each request (forces origin)
-  fileenumflood    Common file name probing (backup.sql, config.php, .env)
-  soapflood        SOAP/XML-RPC envelope POST with XML action header
-  signedheaderflood AWS-style Authorization: AWS4-HMAC-SHA256 ***
-  utf8bomflood     UTF-8 BOM in POST body (some parsers mis-handle this)
-  doubledotflood   Path traversal sequences (..;/..;/..;/etc/)
-  emptyparamflood  Empty/naked query params (?&&key&&&=)
-  headerorderflood Same headers in varying order (header normalization overhead)
-  crossdomainflood Cross-domain policy probing (/crossdomain.xml, /clientaccesspolicy.xml)
-  refererflood     Varying Referer headers to trigger referer-based processing");
+    print_list_modes();
         return;
-    }
+    
 
     println!("=== Simulate Load Rust ===");
     println!("Target: {}", target_url);

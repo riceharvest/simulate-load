@@ -11,12 +11,18 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::catalog::METHODS;
+use crate::catalog::{AmplificationMethod, METHODS, NetworkLayer, TransportType};
+
+pub enum GuiAction {
+    Quit,
+    RunAttack(&'static AmplificationMethod),
+}
 
 pub struct GuiApp {
     selected_layer: usize,
     selected_method: usize,
     should_quit: bool,
+    pending_attack: Option<&'static AmplificationMethod>,
 }
 
 fn unique_layers() -> Vec<&'static str> {
@@ -30,7 +36,7 @@ fn unique_layers() -> Vec<&'static str> {
     seen
 }
 
-fn methods_in_layer(layer_name: &str) -> Vec<&'static crate::catalog::AmplificationMethod> {
+fn methods_in_layer(layer_name: &str) -> Vec<&'static AmplificationMethod> {
     METHODS
         .iter()
         .filter(|m| m.layer.name() == layer_name)
@@ -43,6 +49,7 @@ impl GuiApp {
             selected_layer: 0,
             selected_method: 0,
             should_quit: false,
+            pending_attack: None,
         }
     }
 
@@ -54,40 +61,56 @@ impl GuiApp {
         layers[self.selected_layer.min(layers.len() - 1)]
     }
 
-    fn current_methods(&self) -> Vec<&'static crate::catalog::AmplificationMethod> {
+    fn current_methods(&self) -> Vec<&'static AmplificationMethod> {
         methods_in_layer(self.current_layer_name())
     }
 
-    fn current_method(&self) -> Option<&'static crate::catalog::AmplificationMethod> {
+    fn current_method(&self) -> Option<&'static AmplificationMethod> {
         let methods = self.current_methods();
         methods.get(self.selected_method).copied()
     }
 
+    /// Run the GUI: loop entering/exiting TUI for each action
     pub fn run(&mut self) -> io::Result<()> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        stdout.execute(EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = ratatui::Terminal::new(backend)?;
-        terminal.clear()?;
+        loop {
+            enable_raw_mode()?;
+            let mut stdout = io::stdout();
+            stdout.execute(EnterAlternateScreen)?;
+            let backend = CrosstermBackend::new(stdout);
+            let mut terminal = ratatui::Terminal::new(backend)?;
+            terminal.clear()?;
 
-        let res = self.run_loop(&mut terminal);
+            let action = self.run_until_action(&mut terminal)?;
 
-        drop(terminal);
-        disable_raw_mode()?;
-        let _ = io::stdout().execute(LeaveAlternateScreen);
-        res
+            drop(terminal);
+            disable_raw_mode()?;
+            let _ = io::stdout().execute(LeaveAlternateScreen);
+
+            match action {
+                GuiAction::Quit => break,
+                GuiAction::RunAttack(method) => {
+                    self.execute_attack(method);
+                }
+            }
+        }
+        Ok(())
     }
 
-    fn run_loop(
+    /// Returns when the user either quits or wants to run an attack
+    fn run_until_action(
         &mut self,
         terminal: &mut ratatui::Terminal<CrosstermBackend<std::io::Stdout>>,
-    ) -> io::Result<()> {
+    ) -> io::Result<GuiAction> {
+        self.pending_attack = None;
         while !self.should_quit {
             terminal.draw(|f| self.render(f))?;
             self.handle_events()?;
+            if let Some(method) = self.pending_attack.take() {
+                self.should_quit = false;
+                return Ok(GuiAction::RunAttack(method));
+            }
         }
-        Ok(())
+        Ok(GuiAction::Quit)
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
@@ -121,12 +144,104 @@ impl GuiApp {
                                 self.selected_method = 0;
                             }
                         }
+                        KeyCode::Enter => {
+                            if let Some(method) = self.current_method() {
+                                if method.is_implemented {
+                                    self.pending_attack = Some(method);
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    /// Run a catalog method by spawning the current binary as a subprocess
+    fn execute_attack(&self, method: &'static AmplificationMethod) {
+        println!();
+        println!("  ⚡ Running: {} (id: {})", method.name, method.id);
+        println!("  Layer: {} | Transport: {} | Port: {} | Amplification: {}",
+            method.layer.name(), method.transport.name(), method.port, method.ampl_factor);
+        println!("  ─────────────────────────────────────────────────────");
+
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("  Error: cannot find binary path: {}", e);
+                println!("\n  Press Enter to return to browser...");
+                let _ = io::stdin().read_line(&mut String::new());
+                return;
+            }
+        };
+
+        let concurrency = 10;
+        let duration = 15;
+
+        let mut cmd = std::process::Command::new(&exe);
+
+        // HTTP methods (have http_mode)
+        if let Some(mode) = method.http_mode {
+            cmd.args([
+                "--proxy",
+                "",
+                mode,
+                &concurrency.to_string(),
+                &duration.to_string(),
+            ]);
+        } else {
+            match method.transport {
+                TransportType::Tcp => {
+                    let target = format!("127.0.0.1:{}", method.port);
+                    cmd.args([
+                        "--protocol",
+                        "tcp",
+                        &target,
+                        method.id,
+                        &concurrency.to_string(),
+                        &duration.to_string(),
+                    ]);
+                }
+                TransportType::Udp => {
+                    let target = format!("127.0.0.1:{}", method.port);
+                    cmd.args([
+                        "--protocol",
+                        "udp",
+                        &target,
+                        method.id,
+                        &concurrency.to_string(),
+                        &duration.to_string(),
+                    ]);
+                }
+                _ => {
+                    println!("  This method ({} transport) is not yet supported from the GUI.",
+                        method.transport.name());
+                    println!("\n  Press Enter to return to browser...");
+                    let _ = io::stdin().read_line(&mut String::new());
+                    return;
+                }
+            }
+        }
+
+        let status = cmd.status();
+        match status {
+            Ok(s) => {
+                if !s.success() {
+                    if let Some(code) = s.code() {
+                        eprintln!("  Attack exited with code {}", code);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  Failed to run attack: {}", e);
+            }
+        }
+
+        println!("\n  ─────────────────────────────────────────────────────");
+        println!("  Attack finished. Press Enter to return to browser...");
+        let _ = io::stdin().read_line(&mut String::new());
     }
 
     fn render(&self, f: &mut Frame) {
@@ -140,13 +255,13 @@ impl GuiApp {
                 Constraint::Length(1),
                 Constraint::Length(3),
                 Constraint::Min(8),
-                Constraint::Length(8),
+                Constraint::Length(9),
             ])
             .split(f.area());
 
         // Title
         let title = Paragraph::new(Line::from(Span::styled(
-            " simulate-load - Amplification Methods Browser ",
+            " simulate-load - Amplification Methods Browser [Enter=run, q=quit] ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -221,7 +336,7 @@ impl GuiApp {
             .highlight_style(Style::default().add_modifier(Modifier::BOLD));
         f.render_widget(method_list, main_chunks[2]);
 
-        // Description
+        // Description + hint
         if let Some(m) = selected {
             let mut info = vec![
                 Line::from(vec![Span::styled(
@@ -247,8 +362,19 @@ impl GuiApp {
                         "Not yet"
                     },
                 ))]),
-                Line::from(Span::raw("")),
             ];
+            if m.is_implemented {
+                info.push(Line::from(Span::styled(
+                    "  Press Enter to run this attack (10 conn, 15s)",
+                    Style::default().fg(Color::Yellow),
+                )));
+            } else {
+                info.push(Line::from(Span::styled(
+                    "  This method is not yet implemented",
+                    Style::default().fg(Color::Red),
+                )));
+            }
+            info.push(Line::from(Span::raw("")));
             for line in m.description.lines() {
                 info.push(Line::from(Span::raw(line)));
             }
