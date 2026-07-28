@@ -1,12 +1,18 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, AtomicU32};
+use std::time::{Duration, Instant};
+
+// ── Proxy pool modes ──────────────────────────────────────────────────────────
+
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum ProxyMode { Scrape, Tor, ScrapeTorFallback }
+pub(crate) enum ProxyMode { Scrape, Tor, ScrapeTorFallback }
 impl std::fmt::Display for ProxyMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self { ProxyMode::Scrape => write!(f, "Scrape"), ProxyMode::Tor => write!(f, "Tor"), ProxyMode::ScrapeTorFallback => write!(f, "Scrape→Tor") }
     }
 }
 impl ProxyMode {
-    pub fn from_str(s: &str) -> Self {
+    pub(crate) fn from_str(s: &str) -> Self {
         match s.to_ascii_lowercase().as_str() {
             "tor" => ProxyMode::Tor,
             "scrape-tor" => ProxyMode::ScrapeTorFallback,
@@ -15,8 +21,10 @@ impl ProxyMode {
     }
 }
 
+// ── Attack modes ──────────────────────────────────────────────────────────────
+
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum AttackMode { Bandwidth, SlowRead, ImageOpt, LargePost, AssetSpray, RangeReq, CookieBomb, Ssr, Middleware, RequestFlood, Normal, NotFound, Slowloris, HeaderBomb, QueryFlood, DeepPath, AuthFlood,
+pub(crate) enum AttackMode { Bandwidth, SlowRead, ImageOpt, LargePost, AssetSpray, RangeReq, CookieBomb, Ssr, Middleware, RequestFlood, Normal, NotFound, Slowloris, HeaderBomb, QueryFlood, DeepPath, AuthFlood,
     CacheBypass, FormMulti, XmlBomb, GraphqlFlood, RedirectLoop, EmptyBody,
     ChunkedFlood, TrailHeaders, ConnectionClose, Expect100, VaryFlood, DeflateBomb,
     TraceAmplify, HostPoison, ConditionalFlood, CorsFlood, PutFlood, DeleteFlood,
@@ -129,7 +137,7 @@ impl std::fmt::Display for AttackMode {
     }
 }
 impl AttackMode {
-    pub fn from_str(s: &str) -> Self {
+    pub(crate) fn from_str(s: &str) -> Self {
         match s.to_ascii_lowercase().as_str() {
             "bandwidth" => AttackMode::Bandwidth,
             "slowread" => AttackMode::SlowRead,
@@ -221,4 +229,181 @@ impl AttackMode {
             _ => AttackMode::Normal,
         }
     }
+}
+
+// ── Error type ────────────────────────────────────────────────────────────────
+
+pub(crate) type FetchError = Box<dyn std::error::Error + Send + Sync>;
+
+// ── Client configuration ──────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub(crate) struct ClientConfig {
+    pub(crate) pinned_dns: Option<(String, std::net::IpAddr)>,
+    pub(crate) pool_max_idle: usize,
+    pub(crate) pool_idle_timeout: Duration,
+    pub(crate) sni: Option<String>,
+    pub(crate) timeout: Duration,
+    pub(crate) max_redirects: usize,
+    pub(crate) tor_circuits: usize,
+    pub(crate) rate_limit: Option<u64>,
+    pub(crate) insecure: bool,
+    pub(crate) custom_user_agent: Option<String>,
+    pub(crate) custom_headers: Vec<(String, String)>,
+}
+
+// ── Browser profile (user-agent rotation) ─────────────────────────────────────
+
+pub(crate) struct BrowserProfile {
+    pub(crate) ua: &'static str,
+    pub(crate) sec_ch_ua: Option<&'static str>,
+    pub(crate) platform: Option<&'static str>,
+    pub(crate) mobile: &'static str,
+}
+
+pub(crate) struct BrowserHeaders {
+    pub(crate) headers: [(&'static str, &'static str); 15],
+    pub(crate) len: usize,
+}
+
+// ── Proxy-scrape source URLs ──────────────────────────────────────────────────
+
+pub(crate) const HTML_SRC: &[&str] = &["https://free-proxy-list.net/", "https://www.sslproxies.org/", "https://www.us-proxy.org/", "https://free-proxy-list.net/anonymous-proxy.html", "https://free-proxy-list.net/uk-proxy.html", "https://www.socks-proxy.net/"];
+
+pub(crate) const RAW_SRC: &[&str] = &[
+    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt","https://api.proxyscrape.com/v2/?request=getproxies&protocol=https&timeout=10000&country=all","https://proxyspace.pro/https.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt","https://sunny9577.github.io/proxy-scraper/generated/https_proxies.txt","https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+    "https://raw.githubusercontent.com/wiki/gfpcom/free-proxy-list/lists/https.txt","https://vakhov.github.io/fresh-proxy-list/https.txt","https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/https/data.txt",
+    "https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/https.txt","https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/https.txt",
+    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt","https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=all","https://proxyspace.pro/socks5.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt","https://sunny9577.github.io/proxy-scraper/generated/socks5_proxies.txt","https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt",
+    "https://raw.githubusercontent.com/wiki/gfpcom/free-proxy-list/lists/socks5.txt","https://vakhov.github.io/fresh-proxy-list/socks5.txt","https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt",
+    "https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/socks5.txt","https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/socks5.txt",
+    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks4.txt","https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks4&timeout=10000&country=all","https://proxyspace.pro/socks4.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks4.txt","https://sunny9577.github.io/proxy-scraper/generated/socks4_proxies.txt","https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt",
+    "https://raw.githubusercontent.com/wiki/gfpcom/free-proxy-list/lists/socks4.txt","https://vakhov.github.io/fresh-proxy-list/socks4.txt","https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt",
+    "https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/socks4.txt","https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/socks4.txt",
+    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt","https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all","https://proxyspace.pro/http.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/SOCKS-Proxy-list/master/http.txt","https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt","https://sunny9577.github.io/proxy-scraper/generated/http_proxies.txt",
+    "https://raw.githubusercontent.com/wiki/gfpcom/free-proxy-list/lists/http.txt","https://vakhov.github.io/fresh-proxy-list/http.txt","https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt",
+    "https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/http.txt","https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/http.txt",
+    "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt","https://raw.githubusercontent.com/themiralay/Proxy-List-World/master/data.txt","https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt",
+];
+
+// ── Proxy pool ────────────────────────────────────────────────────────────────
+
+pub(crate) struct ProxyPool {
+    pub(crate) clients: Vec<reqwest::Client>,
+    pub(crate) labels: Vec<String>,
+    pub(crate) current: usize,
+    pub(crate) cooldown_until: Vec<Instant>,
+    pub(crate) failure_tier: Vec<u32>,
+    pub(crate) succeeded: Vec<bool>,
+    pub(crate) weights: Vec<f64>,
+    pub(crate) active_indices: Vec<usize>,
+    pub(crate) active_weights: Vec<f64>,
+    pub(crate) config: ClientConfig,
+    pub(crate) circuit_ids: Vec<u32>,
+    pub(crate) circuit_stickiness: usize,
+    pub(crate) circuit_rotation_counter: AtomicUsize,
+    pub(crate) circuit_requests: Arc<std::sync::Mutex<HashMapWrapper>>,
+    pub(crate) circuit_cooldown: Vec<Instant>,
+    pub(crate) circuit_failures: Vec<u32>,
+    pub(crate) rotation_strategy: String,
+}
+
+// Helper alias for the HashMap used inside ProxyPool.
+pub(crate) type HashMapWrapper = std::collections::HashMap<usize, (u64, u64)>;
+
+// ── Latency sampling ──────────────────────────────────────────────────────────
+
+pub(crate) struct LatencySamples {
+    pub(crate) samples: Vec<AtomicU32>,
+    pub(crate) idx: AtomicUsize,
+}
+
+// ── Runtime statistics ────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub(crate) struct Stats {
+    pub(crate) running: Arc<AtomicBool>,
+    pub(crate) total_requests: Arc<AtomicU64>,
+    pub(crate) total_bytes: Arc<AtomicU64>,
+    pub(crate) errors: Arc<AtomicU64>,
+    pub(crate) error_timeout: Arc<AtomicU64>,
+    pub(crate) error_connect: Arc<AtomicU64>,
+    pub(crate) error_other: Arc<AtomicU64>,
+    pub(crate) total_latency_ms: Arc<AtomicU64>,
+    pub(crate) status_2xx: Arc<AtomicU64>,
+    pub(crate) status_3xx: Arc<AtomicU64>,
+    pub(crate) status_4xx: Arc<AtomicU64>,
+    pub(crate) status_5xx: Arc<AtomicU64>,
+    pub(crate) status_other: Arc<AtomicU64>,
+    pub(crate) status_hist: Arc<[AtomicU64; 900]>,
+    pub(crate) latency_samples: Arc<LatencySamples>,
+    pub(crate) concurrency: Arc<AtomicUsize>,
+    pub(crate) abort: Arc<AtomicBool>,
+}
+
+// ── Application state ─────────────────────────────────────────────────────────
+
+pub(crate) struct AppState {
+    pub(crate) mode: ProxyMode,
+    pub(crate) stats: Stats,
+    pub(crate) iteration: u64,
+    pub(crate) status_msg: String,
+    pub(crate) proxy_status: Vec<(String, String)>,
+    pub(crate) total_alive: usize,
+    pub(crate) total_working: usize,
+    pub(crate) total_scraped: usize,
+    pub(crate) scrape_phase: u32,
+    pub(crate) scrape_total: u32,
+    pub(crate) tcp_checked: u32,
+    pub(crate) tcp_total: u32,
+    pub(crate) validated: u32,
+    pub(crate) validation_total: u32,
+    pub(crate) target_url: String,
+    pub(crate) attack_mode: AttackMode,
+    pub(crate) max_scrape: usize,
+    pub(crate) load_concurrency: usize,
+    pub(crate) interval_ms: u64,
+    pub(crate) jitter_ms: u64,
+    pub(crate) jitter_percent: Option<u64>,
+    pub(crate) tcp_concurrency: usize,
+    pub(crate) rate_limit: Option<u64>,
+    pub(crate) validate_concurrency: usize,
+    pub(crate) validate_timeout_secs: u64,
+    pub(crate) probe_status: String,
+    pub(crate) has_image_opt: bool,
+    pub(crate) has_api: bool,
+    pub(crate) has_middleware: bool,
+    pub(crate) is_vercel: bool,
+    pub(crate) vercel_plan: String,
+    pub(crate) has_isr: bool,
+    pub(crate) has_cache_bypass: bool,
+    pub(crate) has_edge_config: bool,
+    pub(crate) has_log_drains: bool,
+    pub(crate) has_storage: bool,
+    pub(crate) imgs: Vec<String>,
+    pub(crate) apis: Vec<String>,
+    pub(crate) statics: Vec<String>,
+    pub(crate) sessions: Arc<Vec<std::sync::Mutex<String>>>,
+    pub(crate) client_config: ClientConfig,
+    pub(crate) custom_selector: Option<String>,
+    pub(crate) tor_proxy: Option<String>,
+    pub(crate) verbose: bool,
+    pub(crate) max_retries: usize,
+}
+
+// ── CSV export parameters ─────────────────────────────────────────────────────
+
+pub(crate) struct ResultsCsvParams<'a> {
+    pub(crate) target: &'a str,
+    pub(crate) status: &'a str,
+    pub(crate) proxies: &'a [String],
+    pub(crate) concurrency: usize,
+    pub(crate) attack: &'a str,
+    pub(crate) total_reqs: u64,
+    pub(crate) total_bytes: u64,
+    pub(crate) duration: u64,
 }
