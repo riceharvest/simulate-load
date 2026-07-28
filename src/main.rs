@@ -72,6 +72,7 @@ fn print_help() {
     println!("  --auto-tune           Enable PID controller concurrency auto-tuning");
     println!("  --tui                 Enable interactive console dashboard");
     println!("  --gui                 Launch amplification methods browser (TUI)");
+    println!("  --trigger <port>      Start a trigger amplifier listener on a UDP port");
     println!("  --config F            Load configuration from file");
     println!("  --insecure            Skip SSL certificate verification");
     println!("  --custom-header H     Add custom header (format: 'Name: Value')");
@@ -115,12 +116,13 @@ fn print_help() {
 
 mod types;
 mod catalog;
-mod gui;
+mod support;
+mod http;
 mod tcp;
 mod udp;
 mod raw;
-mod http;
-mod support;
+mod gui;
+mod trigger;
 use crate::types::*;
 use crate::http::*;
 use crate::support::*;
@@ -347,6 +349,28 @@ async fn main() {
                         eprintln!("GUI error: {}", e);
                         return;
                     }
+                }
+            }
+            "--trigger" => {
+                if let Some(val) = args_iter.next() {
+                    let port: u16 = val.parse().unwrap_or(19999);
+                    let config = trigger::TriggerConfig {
+                        bind: format!("0.0.0.0:{}", port).parse().unwrap(),
+                        ..Default::default()
+                    };
+                    println!("Starting trigger amplifier on UDP port {}...", port);
+                    println!("Press Ctrl+C to stop.");
+                    tokio::select! {
+                        r = trigger::run_trigger(config) => {
+                            if let Err(e) = r {
+                                eprintln!("Trigger error: {}", e);
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            println!("\nTrigger stopped.");
+                        }
+                    }
+                    return;
                 }
             }
             "--insecure" => insecure = true,
