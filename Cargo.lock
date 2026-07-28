@@ -1555,6 +1555,7 @@ dependencies = [
  "bytes",
  "crossterm",
  "flate2",
+ "libc",
  "rand 0.10.2",
  "ratatui",
  "regex",

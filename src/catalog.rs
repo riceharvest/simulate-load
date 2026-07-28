@@ -1375,7 +1375,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "Connection queue exhaustion",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1388,7 +1388,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "Connection disruption",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1401,7 +1401,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "Resource exhaustion per connection",
         needs_root: false,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1430,7 +1430,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "1-Nx (N = hosts on network)",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1443,7 +1443,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "Performance degradation",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1456,7 +1456,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "Memory exhaustion per fragment",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     // ================================================================
@@ -1472,7 +1472,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "CAM table exhaustion",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1485,7 +1485,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "Switch CAM table exhaustion",
         needs_root: true,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
 ];

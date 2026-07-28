@@ -118,6 +118,7 @@ mod catalog;
 mod gui;
 mod tcp;
 mod udp;
+mod raw;
 mod http;
 mod support;
 use crate::types::*;
@@ -560,6 +561,25 @@ async fn main() {
             }
         };
         udp::run_udp_load(udp_mode, &udp_host, udp_concurrency, udp_duration).await;
+        return;
+    }
+
+    // ── Protocol: Raw socket operations (requires root/CAP_NET_RAW) ──
+    if protocol == "raw" {
+        let raw_target = positional.first().cloned().unwrap_or_else(|| "127.0.0.1:80".to_string());
+        let raw_mode_str = positional.get(1).cloned().unwrap_or_else(|| "tcp-syn-flood".to_string());
+        let raw_concurrency: usize = positional.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
+        let raw_duration: u64 = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(30);
+
+        let raw_mode = match raw::RawMode::from_str(&raw_mode_str) {
+            Some(m) => m,
+            None => {
+                eprintln!("  Unknown raw socket mode: {}. Available: tcp-syn-flood, tcp-rst-flood, icmp-smurf, icmp-fragmentation, ip-frag-overload, arp-flood, mac-flooding", raw_mode_str);
+                return;
+            }
+        };
+
+        raw::run_raw_load(raw_mode, &raw_target, raw_concurrency, raw_duration).await;
         return;
     }
 
