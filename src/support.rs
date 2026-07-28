@@ -304,6 +304,11 @@ impl AppState {
         tor_proxy: None,
         verbose: false,
         max_retries: 3,
+        // Safety controls
+        max_requests: 0,
+        concurrency_max: 0,
+        error_rate_threshold: 1.0,
+        throughput_cap_mbps: 0.0,
     }}
 }
 
@@ -805,8 +810,40 @@ pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::M
         let st = state.lock().await;
         (st.load_concurrency, st.interval_ms, st.attack_mode, st.sessions.clone(), st.jitter_ms, st.apis.clone(), st.statics.clone(), st.rate_limit, st.verbose, st.max_retries, st.jitter_percent)
     };
+    
+    // Safety controls
+    let safety = {
+        let st = state.lock().await;
+        (
+            st.max_requests,
+            st.concurrency_max,
+            st.error_rate_threshold,
+            st.throughput_cap_mbps,
+        )
+    };
+    
+    // Safety enforcement: apply limits
+    let mut effective_conc = conc;
+    if safety.0 > 0 {
+        effective_conc = effective_conc.min(safety.0 as usize);
+    }
+    if safety.1 > 0 {
+        effective_conc = effective_conc.min(safety.1);
+    }
+    let throughput_cap_bytes = if safety.3 > 0.0 {
+        (safety.3 * 1024.0 * 1024.0 / 8.0) as u64
+    } else {
+        0
+    };
+    
     let mut jitter_ms;
-    let mut semaphore = Arc::new(Semaphore::new(conc));
+    
+    // Safety enforcement: apply throughput cap (checked per-loop before spawning)
+    if throughput_cap_bytes > 0 {
+        stats.total_bytes.store(0, Ordering::Relaxed);
+    }
+    
+    let mut semaphore = Arc::new(Semaphore::new(effective_conc));
 
     loop {
         if let Some(max_err) = max_errors {
@@ -818,6 +855,28 @@ pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::M
         if !stats.running.load(Ordering::Relaxed) {
             if stats.abort.load(Ordering::Relaxed) { return; }
             tokio::time::sleep(Duration::from_millis(100)).await; continue;
+        }
+        
+        // Enforce max_requests limit
+        if safety.0 > 0 {
+            if stats.total_requests.load(Ordering::Relaxed) >= safety.0 {
+                println!("  Max requests ({}) reached, stopping.", safety.0);
+                stats.abort.store(true, Ordering::Relaxed);
+                return;
+            }
+        }
+        
+        // Enforce error_rate_threshold
+        if safety.2 > 0.0 {
+            let total = stats.total_requests.load(Ordering::Relaxed);
+            if total > 0 {
+                let error_rate = stats.errors.load(Ordering::Relaxed) as f64 / total as f64;
+                if error_rate >= safety.2 {
+                    println!("  Error rate ({:.2}%) exceeded threshold ({:.2}%), stopping.", error_rate * 100.0, safety.2 * 100.0);
+                    stats.abort.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
         }
         
         let (new_conc, new_jitter, target_url) = {

@@ -400,6 +400,11 @@ pub(crate) struct AppState {
     pub(crate) tor_proxy: Option<String>,
     pub(crate) verbose: bool,
     pub(crate) max_retries: usize,
+    // Safety controls
+    pub(crate) max_requests: u64,
+    pub(crate) concurrency_max: usize,
+    pub(crate) error_rate_threshold: f64,
+    pub(crate) throughput_cap_mbps: f64,
 }
 
 // ── CSV export parameters ─────────────────────────────────────────────────────

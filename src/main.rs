@@ -41,6 +41,10 @@ fn print_help() {
     println!("  --jitter MS           Random delay jitter in milliseconds");
     println!("  --jitter-percent PCT  Scale jitter to PCT percent of per-request delay (0-100)");
     println!("  --max-errors N        Stop after N failed requests");
+   println!("  --max-requests N      Stop after N total requests completed");
+   println!("  --concurrency-max N   Cap maximum concurrent tasks (default: unlimited)");
+   println!("  --error-rate-threshold F  Stop if error rate exceeds F (0.0-1.0, default: 1.0)");
+   println!("  --throughput-cap MBPS Cap bandwidth throughput in Mbps (default: unlimited)");
     println!("  --spoof-ip            Enable randomized IP spoofing headers (X-Forwarded-For, etc.)");
     println!("  --quiet               Quiet mode: suppress status updates during load test");
     println!("  --verbose             Verbose mode: detailed request logging");
@@ -212,6 +216,10 @@ async fn main() {
     let mut ramp_up_secs: u64 = 0;
     let mut find_max = false;
     let mut request_timeout: u64 = 10;
+    let mut max_requests: Option<u64> = None;
+    let mut concurrency_max: Option<usize> = None;
+    let mut error_rate_threshold: f64 = 1.0;
+    let mut throughput_cap_mbps: Option<f64> = None;
 
     let mut args_iter = args.into_iter().skip(1);
     while let Some(arg) = args_iter.next() {
@@ -251,6 +259,26 @@ async fn main() {
             "--max-errors" => {
                 if let Some(val) = args_iter.next() {
                     max_errors = val.parse().ok();
+                }
+            }
+            "--max-requests" => {
+                if let Some(val) = args_iter.next() {
+                    max_requests = val.parse().ok();
+                }
+            }
+            "--concurrency-max" => {
+                if let Some(val) = args_iter.next() {
+                    concurrency_max = val.parse().ok();
+                }
+            }
+            "--error-rate-threshold" => {
+                if let Some(val) = args_iter.next() {
+                    error_rate_threshold = val.parse::<f64>().unwrap_or(1.0).clamp(0.0, 1.0);
+                }
+            }
+            "--throughput-cap" => {
+                if let Some(val) = args_iter.next() {
+                    throughput_cap_mbps = val.parse().ok();
                 }
             }
             "--save-proxies" => {
@@ -421,6 +449,14 @@ async fn main() {
                     if let Ok(parsed) = other.strip_prefix("--request-timeout=").unwrap_or("").parse::<u64>() {
                         request_timeout = parsed.clamp(1, 300);
                     }
+                } else if other.starts_with("--max-requests=") {
+                    max_requests = other.strip_prefix("--max-requests=").unwrap_or("").parse().ok();
+                } else if other.starts_with("--concurrency-max=") {
+                    concurrency_max = other.strip_prefix("--concurrency-max=").unwrap_or("").parse().ok();
+                } else if other.starts_with("--error-rate-threshold=") {
+                    error_rate_threshold = other.strip_prefix("--error-rate-threshold=").unwrap_or("").parse::<f64>().unwrap_or(1.0).clamp(0.0, 1.0);
+                } else if other.starts_with("--throughput-cap=") {
+                    throughput_cap_mbps = other.strip_prefix("--throughput-cap=").unwrap_or("").parse().ok();
                 } else if other.starts_with("--body=") {
                     let val = other.strip_prefix("--body=").unwrap_or("").to_string();
                     let _ = CUSTOM_POST_BODY.set(val);
@@ -517,6 +553,10 @@ async fn main() {
                         "request_timeout" => if let Ok(parsed) = val.parse::<u64>() { request_timeout = parsed.clamp(1, 300); },
                         "body" | "post_body" => { let _ = CUSTOM_POST_BODY.set(val.to_string()); },
                         "content_type" | "content-type" => { let _ = CUSTOM_CONTENT_TYPE.set(val.to_string()); },
+                        "max_requests" => max_requests = val.parse().ok(),
+                        "concurrency_max" | "concurrency-max" => concurrency_max = val.parse().ok(),
+                        "error_rate_threshold" => error_rate_threshold = val.parse::<f64>().unwrap_or(1.0).clamp(0.0, 1.0),
+                        "throughput_cap" => throughput_cap_mbps = val.parse().ok(),
                         _ => {}
                     }
                 }
@@ -693,6 +733,11 @@ async fn main() {
             st.tor_proxy = tor_proxy.clone();
             st.attack_mode = AttackMode::from_str(&attack_str);
             st.mode = ProxyMode::from_str(&mode_str);
+            // Safety controls
+            st.max_requests = max_requests.unwrap_or(0);
+            st.concurrency_max = concurrency_max.unwrap_or(0);
+            st.error_rate_threshold = error_rate_threshold;
+            st.throughput_cap_mbps = throughput_cap_mbps.unwrap_or(0.0);
         }
 
         println!("[1/1] Probing domain...");
@@ -1243,6 +1288,18 @@ async fn main() {
                         stats.status_5xx.load(Ordering::Relaxed),
                         stats.status_other.load(Ordering::Relaxed)
                     );
+                    // Safety controls status (read from AppState)
+                    let safety = {
+                        let st = state.lock().await;
+                        (st.max_requests, st.concurrency_max, st.error_rate_threshold, st.throughput_cap_mbps)
+                    };
+                    println!("   [Safety Controls]");
+                    println!("   Max Requests:  {} ({})", if safety.0 > 0 { safety.0 } else { 0 }, if safety.0 > 0 { "ACTIVE" } else { "disabled" });
+                    println!("   Concurrency Max: {} ({})", if safety.1 > 0 { safety.1 } else { 0 }, if safety.1 > 0 { "ACTIVE" } else { "disabled" });
+                    let err_pct = if safety.2 > 0.0 { safety.2 * 100.0 } else { 0.0 };
+                    println!("   Error Rate Threshold: {:.1}% ({})", err_pct, if safety.2 < 1.0 { "ACTIVE" } else { "disabled" });
+                    let throughput_display = if safety.3 > 0.0 { safety.3 } else { 0.0 };
+                    println!("   Throughput Cap: {:.1} Mbps ({})", throughput_display, if safety.3 > 0.0 { "ACTIVE" } else { "disabled" });
                     println!("========================================================================");
                 } else if !quiet {
                     println!(
@@ -1307,6 +1364,15 @@ async fn main() {
                     let parts: Vec<String> = hist_entries.iter().map(|(c, n)| format!("{}:{}", c, n)).collect();
                     println!("  Histogram: {}", parts.join("  "));
                 }
+                // Print safety controls info
+                {
+                    let st = state.lock().await;
+                    println!("  Safety Controls: max_reqs={} ({}), conc_max={} ({}), err_thresh={:.1}% ({}), throughput_cap={:.1}Mbps ({})",
+                        if st.max_requests > 0 { st.max_requests } else { 0 }, if st.max_requests > 0 { "ACTIVE" } else { "disabled" },
+                        if st.concurrency_max > 0 { st.concurrency_max } else { 0 }, if st.concurrency_max > 0 { "ACTIVE" } else { "disabled" },
+                        st.error_rate_threshold * 100.0, if st.error_rate_threshold < 1.0 { "ACTIVE" } else { "disabled" },
+                        st.throughput_cap_mbps, if st.throughput_cap_mbps > 0.0 { "ACTIVE" } else { "disabled" });
+                }
             }
             if let Some(ref log_path) = log_file {
                 if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
@@ -1315,7 +1381,28 @@ async fn main() {
                 }
             }
             if json_output {
-                // Output JSON to stdout
+                // Lock state once for all post-run data
+                let state_guard = state.lock().await;
+                let sessions: Vec<String> = state_guard.sessions.iter().map(|s| {
+                    match s.lock() {
+                        Ok(g) => g.clone(),
+                        Err(poisoned) => poisoned.into_inner().clone(),
+                    }
+                }).collect();
+
+                // Persist sessions for next run
+                if let Ok(json) = serde_json::to_string(&sessions) {
+                    let mut h = DefaultHasher::new();
+                    h.write(target_url.as_bytes());
+                    let safe_name = format!("sessions_{:x}.json", h.finish());
+                    let _ = std::fs::write(&safe_name, json);
+                }
+
+                let error_rate = if final_reqs > 0 {
+                    stats.errors.load(Ordering::Relaxed) as f64 / final_reqs as f64
+                } else {
+                    0.0
+                };
                 let json = serde_json::json!({
                     "target_url": target_url,
                     "mode": mode_str,
@@ -1328,29 +1415,43 @@ async fn main() {
                     "bytes_per_second": final_bytes as f64 / elapsed_secs as f64,
                     "requests_per_second": final_reqs as f64 / elapsed_secs as f64,
                     "avg_latency_ms": final_avg_latency,
-                    "p50_latency_ms": p50,
-                    "p90_latency_ms": p90,
-                    "p95_latency_ms": p95,
-                    "p99_latency_ms": p99,
-                    "status_2xx": stats.status_2xx.load(Ordering::Relaxed),
-                    "status_3xx": stats.status_3xx.load(Ordering::Relaxed),
-                    "status_4xx": stats.status_4xx.load(Ordering::Relaxed),
-                    "status_5xx": stats.status_5xx.load(Ordering::Relaxed),
-                    "status_other": stats.status_other.load(Ordering::Relaxed),
-                    "errors": stats.errors.load(Ordering::Relaxed),
-                    "error_timeout": stats.error_timeout.load(Ordering::Relaxed),
-                    "error_connect": stats.error_connect.load(Ordering::Relaxed),
-                    "error_other": stats.error_other.load(Ordering::Relaxed),
+                    "percentiles": {
+                        "p50": p50,
+                        "p90": p90,
+                        "p95": p95,
+                        "p99": p99
+                    },
+                    "status_codes": {
+                        "2xx": stats.status_2xx.load(Ordering::Relaxed),
+                        "3xx": stats.status_3xx.load(Ordering::Relaxed),
+                        "4xx": stats.status_4xx.load(Ordering::Relaxed),
+                        "5xx": stats.status_5xx.load(Ordering::Relaxed),
+                        "other": stats.status_other.load(Ordering::Relaxed)
+                    },
+                    "errors": {
+                        "total": stats.errors.load(Ordering::Relaxed),
+                        "timeout": stats.error_timeout.load(Ordering::Relaxed),
+                        "connect": stats.error_connect.load(Ordering::Relaxed),
+                        "other": stats.error_other.load(Ordering::Relaxed)
+                    },
+                    "error_rate": (error_rate * 10000.0).round() / 10000.0,
+                    "safety_controls": {
+                        "max_requests": state_guard.max_requests,
+                        "concurrency_max": state_guard.concurrency_max,
+                        "error_rate_threshold": state_guard.error_rate_threshold,
+                        "throughput_cap_mbps": state_guard.throughput_cap_mbps
+                    },
+                    "proxies": prox_list,
+                    "sessions": sessions
                 });
                 match serde_json::to_string_pretty(&json) {
-                    Ok(s) => println!("{}", s),
+                    Ok(s) => println!("{}\n", s),
                     Err(e) => eprintln!("Failed to serialize JSON: {}", e),
                 }
-            }
-            // Persist sessions for next run
-            {
-                let sessions_data = state.lock().await;
-                let sessions: Vec<String> = sessions_data.sessions.iter().map(|s| {
+            } else {
+                // Persist sessions for next run (non-JSON mode)
+                let state_guard = state.lock().await;
+                let sessions: Vec<String> = state_guard.sessions.iter().map(|s| {
                     match s.lock() {
                         Ok(g) => g.clone(),
                         Err(poisoned) => poisoned.into_inner().clone(),
