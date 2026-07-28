@@ -1,16 +1,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
-use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, AtomicU32, Ordering};
-use rand::prelude::*;
-use rand::distr::{Distribution, weighted::WeightedIndex};
-use regex::Regex;
-use reqwest::{Client, RequestBuilder};
-use reqwest::header::{HeaderMap, SET_COOKIE};
-use scraper::{Html, Selector};
-use tokio::sync::{Mutex, Semaphore};
+use std::sync::atomic::Ordering;
+use tokio::sync::Mutex;
 use tokio::signal;
 use url::Url;
 
@@ -169,6 +162,7 @@ fn print_list_modes() {
 
 
 #[tokio::main]
+#[allow(unused_variables, unused_assignments, unreachable_code)]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Parse flags
@@ -723,8 +717,6 @@ async fn main() {
         return;
     
 
-    println!("=== Simulate Load Rust ===");
-    println!("Target: {}", target_url);
     println!("Mode: {} (proxy: {})", attack_str, mode_str);
     println!("Concurrency: {}  Duration: {}s", concurrency, duration_secs);
     println!();
@@ -1449,7 +1441,7 @@ async fn main() {
                     for idx in idxs {
                         let (reqs, errs) = m[&idx];
                         let label = guard.labels.get(idx).map(|s: &String| s.as_str()).unwrap_or("?");
-                        let err_pct = if reqs > 0 { (errs as f64 / reqs as f64 * 100.0) } else { 0.0 };
+                        let err_pct = if reqs > 0 { errs as f64 / reqs as f64 * 100.0  } else { 0.0 };
                         println!("    {:<4}  {:>10}  {:>9}  {:>7.1}%  {}", idx, reqs, errs, err_pct, label);
                     }
                 }

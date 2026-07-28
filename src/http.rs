@@ -1,16 +1,13 @@
 use crate::types::*;
-use rand::prelude::*;
 use rand::RngExt;
 use regex::Regex;
 use reqwest::{Client, RequestBuilder};
-use reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE, COOKIE, CONTENT_TYPE, USER_AGENT, HOST};
+use reqwest::header::{HeaderMap, SET_COOKIE};
 use scraper::{Html, Selector};
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
-use tokio::time::{sleep, timeout};
 
 pub(crate) async fn clone_request_builder_with_retry(
     builder: &RequestBuilder,

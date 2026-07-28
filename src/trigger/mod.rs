@@ -11,12 +11,12 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 /// How the trigger amplifies the payload
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AmplifyMode {
     /// Echo back with prepended/trailing padding
     EchoPad(usize),
@@ -33,8 +33,6 @@ pub struct TriggerConfig {
     pub bind: SocketAddr,
     /// How to amplify
     pub amplify: AmplifyMode,
-    /// Max concurrent handler tasks
-    pub max_concurrent: usize,
 }
 
 impl Default for TriggerConfig {
@@ -42,7 +40,6 @@ impl Default for TriggerConfig {
         Self {
             bind: "127.0.0.1:19999".parse().unwrap(),
             amplify: AmplifyMode::EchoPad(256),
-            max_concurrent: 100,
         }
     }
 }

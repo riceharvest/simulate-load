@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::catalog::{AmplificationMethod, METHODS, NetworkLayer, TransportType};
+use crate::catalog::{AmplificationMethod, METHODS, TransportType};
 
 pub enum GuiAction {
     Quit,

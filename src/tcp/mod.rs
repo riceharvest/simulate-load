@@ -773,7 +773,7 @@ pub async fn run_tcp_load(
                     Ok(result) => {
                         (result.sent as u64, result.recv as u64, result.dur, false)
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         (0u64, 0u64, Duration::ZERO, true)
                     }
                 }

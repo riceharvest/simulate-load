@@ -100,6 +100,7 @@ impl UdpMode {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "dns-any" | "dns-amplification" | "dns-any-query" => Some(UdpMode::DnsAny),
@@ -270,7 +271,7 @@ fn build_snmp_getbulk() -> Vec<u8> {
     let req_id: u32 = rand::random();
 
     // SNMP message wrapper
-    let mut pkt = Vec::new();
+    let pkt;
 
     // SEQUENCE { version, community, data }
     // version = SNMPv2c (1)
@@ -1158,7 +1159,7 @@ fn build_dns_recursive() -> Vec<u8> {
 // ================================================================
 fn build_udp_flood() -> Vec<u8> {
     // Large payload to maximize bandwidth usage
-    let mut pkt = vec![0u8; 1472]; // max unfragmented UDP payload
+    let pkt = vec![0u8; 1472]; // max unfragmented UDP payload
     pkt
 }
 

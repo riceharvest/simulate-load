@@ -2,18 +2,13 @@ use crate::types::*;
 use crate::http::*;
 use rand::prelude::*;
 use rand::distr::{Distribution, weighted::WeightedIndex};
-use regex::Regex;
 use reqwest::{Client, RequestBuilder};
-use reqwest::header::{HeaderMap, SET_COOKIE};
 use scraper::{Html, Selector};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU64, AtomicU32, Ordering};
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
-use tokio::signal;
 use url::Url;
 
 

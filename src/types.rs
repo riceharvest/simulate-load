@@ -242,6 +242,7 @@ pub(crate) type FetchError = Box<dyn std::error::Error + Send + Sync>;
 // ── Client configuration ──────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub(crate) struct ClientConfig {
     pub(crate) pinned_dns: Option<(String, std::net::IpAddr)>,
     pub(crate) pool_max_idle: usize,
@@ -296,6 +297,7 @@ pub(crate) const RAW_SRC: &[&str] = &[
 
 // ── Proxy pool ────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub(crate) struct ProxyPool {
     pub(crate) clients: Vec<reqwest::Client>,
     pub(crate) labels: Vec<String>,
@@ -351,6 +353,7 @@ pub(crate) struct Stats {
 
 // ── Application state ─────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub(crate) struct AppState {
     pub(crate) mode: ProxyMode,
     pub(crate) stats: Stats,

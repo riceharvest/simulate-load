@@ -1,5 +1,6 @@
 /// defines the network layer (OSI model) for a method
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum NetworkLayer {
     Application,
     Presentation,
@@ -22,6 +23,7 @@ impl NetworkLayer {
             NetworkLayer::Physical => "L1 Physical",
         }
     }
+    #[allow(dead_code)]
     pub fn short_name(&self) -> &'static str {
         match self {
             NetworkLayer::Application => "App",
