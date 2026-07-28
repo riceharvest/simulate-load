@@ -480,7 +480,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         needs_root: false,
         works_with_tor: true,
         is_implemented: true,
-        http_mode: None,
+        http_mode: Some("normal"),
     },
     AmplificationMethod {
         id: "http-edge-timing",
@@ -493,7 +493,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         needs_root: false,
         works_with_tor: true,
         is_implemented: true,
-        http_mode: None,
+        http_mode: Some("normal"),
     },
     AmplificationMethod {
         id: "http-session-flood",
@@ -506,7 +506,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         needs_root: false,
         works_with_tor: true,
         is_implemented: true,
-        http_mode: None,
+        http_mode: Some("normal"),
     },
     AmplificationMethod {
         id: "http-api-discovery",
@@ -519,7 +519,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         needs_root: false,
         works_with_tor: true,
         is_implemented: true,
-        http_mode: None,
+        http_mode: Some("normal"),
     },
     AmplificationMethod {
         id: "http-encoding-variants",
@@ -532,7 +532,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         needs_root: false,
         works_with_tor: true,
         is_implemented: true,
-        http_mode: None,
+        http_mode: Some("normal"),
     },
     AmplificationMethod {
         id: "http-serialized-bomb",

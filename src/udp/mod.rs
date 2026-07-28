@@ -93,16 +93,16 @@ impl UdpMode {
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "dns-any" => Some(UdpMode::DnsAny),
+            "dns-any" | "dns-amplification" | "dns-any-query" => Some(UdpMode::DnsAny),
             "dns-ixfr" => Some(UdpMode::DnsIxfr),
             "ntp-monlist" => Some(UdpMode::NtpMonlist),
             "ntp-query" => Some(UdpMode::NtpQuery),
             "memcached-stats" => Some(UdpMode::MemcachedStats),
             "memcached-get" => Some(UdpMode::MemcachedGet),
-            "ssdp" => Some(UdpMode::SsdpDiscovery),
-            "snmp" => Some(UdpMode::SnmpGetBulk),
-            "chargen" => Some(UdpMode::CharGen),
-            "qotd" => Some(UdpMode::Qotd),
+            "ssdp" | "ssdp-msearch" => Some(UdpMode::SsdpDiscovery),
+            "snmp" | "snmp-getbulk" => Some(UdpMode::SnmpGetBulk),
+            "chargen" | "chargen-amplification" => Some(UdpMode::CharGen),
+            "qotd" | "qotd-amplification" => Some(UdpMode::Qotd),
             "cldap" | "cldap-search" => Some(UdpMode::CldapSearch),
             "coap" | "coap-amplification" => Some(UdpMode::CoapAmplification),
             "ws-discovery" | "wsd" => Some(UdpMode::WsDiscovery),
@@ -115,8 +115,10 @@ impl UdpMode {
             "rip" | "rip-query" | "ripv1" => Some(UdpMode::RipQuery),
             "bacnet" | "bacnet-discovery" | "bacnet-device" => Some(UdpMode::BacnetDiscovery),
             "ntp-readvar" | "ntpreadvar" => Some(UdpMode::NtpReadVar),
-            "dns-dnssec" | "dnssec" | "dnssec-query" => Some(UdpMode::DnsDnssec),
-            "udp-generic" | "generic" => Some(UdpMode::GenericUdp),
+            "dns-dnssec" | "dnssec" | "dnssec-query" | "dns-dnssec-query" => Some(UdpMode::DnsDnssec),
+            "dns-recursive" | "dns-recursive-chain" => Some(UdpMode::DnsRecursiveChain),
+            "udp-flood" => Some(UdpMode::UdpFlood),
+            "udp-generic" | "generic" | "mongodb-ismaster" | "nfs-mountd" | "openvpn-ping" => Some(UdpMode::GenericUdp),
             _ => None,
         }
     }

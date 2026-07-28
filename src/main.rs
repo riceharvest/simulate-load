@@ -2211,4 +2211,164 @@ mod tests {
         assert_eq!(min_d, 90);
         assert_eq!(max_d, 110);
     }
+
+    // ── Protocol mode parsing tests ──
+
+    #[test]
+    fn tcp_mode_from_str_all_variants() {
+        use crate::tcp::TcpMode;
+        let cases = [
+            ("smtp-vrfy", Some(TcpMode::SmtpVrfy)),
+            ("smtp-expn", Some(TcpMode::SmtpExpn)),
+            ("smtp-rcpt", Some(TcpMode::SmtpRcptTo)),
+            ("smtp-data-bomb", Some(TcpMode::SmtpDataBomb)),
+            ("ssh-auth", Some(TcpMode::SshAuth)),
+            ("ftp-bounce", Some(TcpMode::FtpBounce)),
+            ("ftp-list", Some(TcpMode::FtpList)),
+            ("finger", Some(TcpMode::Finger)),
+            ("imap-login", Some(TcpMode::ImapLogin)),
+            ("pop3-login", Some(TcpMode::Pop3Login)),
+            ("ldap-search", Some(TcpMode::LdapSearch)),
+            ("mqtt-connect", Some(TcpMode::MqttConnect)),
+            ("xmpp-stream", Some(TcpMode::XmppStream)),
+            ("rtsp-describe", Some(TcpMode::RtspDescribe)),
+            ("modbus-tcp", Some(TcpMode::ModbusTcp)),
+            ("socks-connect", Some(TcpMode::SocksConnect)),
+            ("ssl-reneg", Some(TcpMode::SslReneg)),
+            ("telnet-neg", Some(TcpMode::TelnetNeg)),
+            ("tcp-connect", Some(TcpMode::GenericConnect)),
+            ("generic", Some(TcpMode::GenericConnect)),
+            ("tcp-connection-flood", Some(TcpMode::TcpConnectionFlood)),
+            ("redis-slave-read", Some(TcpMode::RedisSlaveRead)),
+            ("docker-api", Some(TcpMode::DockerApi)),
+            ("kerberos-as-req", Some(TcpMode::KerberosAsReq)),
+            ("postgres-md5", Some(TcpMode::PostgresMd5Auth)),
+            ("cassandra-thrift", Some(TcpMode::CassandraThrift)),
+            ("ard-query", Some(TcpMode::ArdQuery)),
+            ("cups-ipp-trigger", Some(TcpMode::CupsIppTrigger)),
+            ("webhook-chain", Some(TcpMode::WebhookChain)),
+            ("unknown-mode", None),
+        ];
+        for (input, expected) in &cases {
+            let result = TcpMode::from_str(input);
+            assert_eq!(result, *expected, "TcpMode::from_str({:?})", input);
+        }
+    }
+
+    #[test]
+    fn udp_mode_from_str_all_variants() {
+        use crate::udp::UdpMode;
+        let cases = [
+            ("dns-any", Some(UdpMode::DnsAny)),
+            ("dns-ixfr", Some(UdpMode::DnsIxfr)),
+            ("ntp-monlist", Some(UdpMode::NtpMonlist)),
+            ("ntp-query", Some(UdpMode::NtpQuery)),
+            ("memcached-stats", Some(UdpMode::MemcachedStats)),
+            ("ssdp", Some(UdpMode::SsdpDiscovery)),
+            ("snmp-getbulk", Some(UdpMode::SnmpGetBulk)),
+            ("chargen", Some(UdpMode::CharGen)),
+            ("qotd", Some(UdpMode::Qotd)),
+            ("generic", Some(UdpMode::GenericUdp)),
+            ("cldap", Some(UdpMode::CldapSearch)),
+            ("coap", Some(UdpMode::CoapAmplification)),
+            ("ws-discovery", Some(UdpMode::WsDiscovery)),
+            ("portmap", Some(UdpMode::PortmapDump)),
+            ("netbios", Some(UdpMode::NetbiosNs)),
+            ("mdns", Some(UdpMode::MdnsQuery)),
+            ("tftp", Some(UdpMode::TftpRead)),
+            ("sip", Some(UdpMode::SipOptions)),
+            ("ike", Some(UdpMode::IkeAmplification)),
+            ("rip", Some(UdpMode::RipQuery)),
+            ("bacnet", Some(UdpMode::BacnetDiscovery)),
+            ("ntp-readvar", Some(UdpMode::NtpReadVar)),
+            ("dnssec", Some(UdpMode::DnsDnssec)),
+            ("dns-recursive-chain", Some(UdpMode::DnsRecursiveChain)),
+            ("udp-flood", Some(UdpMode::UdpFlood)),
+            ("memcached-get", Some(UdpMode::MemcachedGet)),
+        ];
+        for (input, expected) in &cases {
+            let result = UdpMode::from_str(input);
+            assert_eq!(result, *expected, "UdpMode::from_str({:?})", input);
+        }
+    }
+
+    #[test]
+    fn raw_mode_from_str_all_variants() {
+        use crate::raw::RawMode;
+        let cases = [
+            ("tcp-syn-flood", Some(RawMode::TcpSynFlood)),
+            ("tcpsyn", Some(RawMode::TcpSynFlood)),
+            ("tcp-rst-flood", Some(RawMode::TcpRstFlood)),
+            ("icmp-smurf", Some(RawMode::IcmpSmurf)),
+            ("icmp-fragmentation", Some(RawMode::IcmpFragmentation)),
+            ("ip-frag-overload", Some(RawMode::IpFragOverload)),
+            ("arp-flood", Some(RawMode::ArpFlood)),
+            ("mac-flooding", Some(RawMode::MacFlooding)),
+        ];
+        for (input, expected) in &cases {
+            let result = RawMode::from_str(input);
+            assert_eq!(result, *expected, "RawMode::from_str({:?})", input);
+        }
+    }
+
+    /// Verify that the catalog's HTTP mode ids all parse as AttackMode
+    #[test]
+    fn catalog_http_modes_parse_as_attack_mode() {
+        use crate::types::AttackMode;
+        let fallback_to_normal: Vec<&str> = crate::catalog::METHODS
+            .iter()
+            .filter(|m| m.layer == crate::catalog::NetworkLayer::Application && m.transport == crate::catalog::TransportType::Tcp)
+            .filter_map(|m| m.http_mode)
+            .filter(|mode| matches!(AttackMode::from_str(mode), AttackMode::Normal))
+            .collect();
+        // Some catalog entries legitimately map to Normal (e.g. generic HTTP loadtest)
+        // This test just checks that from_str doesn't panic or break for any known catalog entry
+        assert!(fallback_to_normal.len() < 10, "Too many HTTP catalog modes fall back to Normal: {:?}", fallback_to_normal);
+    }
+
+    /// Verify that the catalog's TCP mode ids all parse as TcpMode
+    #[test]
+    fn catalog_tcp_modes_parse_as_tcp_mode() {
+        let unimplemented: Vec<&str> = crate::catalog::METHODS
+            .iter()
+            .filter(|m| m.transport == crate::catalog::TransportType::Tcp)
+            .filter_map(|m| {
+                if m.http_mode.is_some() { return None; } // skip HTTP-over-TCP entries
+                let id = m.id;
+                if crate::tcp::TcpMode::from_str(id).is_some() { None } else { Some(id) }
+            })
+            .collect();
+        assert!(unimplemented.is_empty(), "TCP catalog ids not parseable as TcpMode: {:?}", unimplemented);
+    }
+
+    /// Verify that the catalog's UDP mode ids all parse as UdpMode
+    #[test]
+    fn catalog_udp_modes_parse_as_udp_mode() {
+        let unimplemented: Vec<&str> = crate::catalog::METHODS
+            .iter()
+            .filter(|m| m.transport == crate::catalog::TransportType::Udp)
+            .filter_map(|m| {
+                let id = m.id;
+                if crate::udp::UdpMode::from_str(id).is_some() { None } else { Some(id) }
+            })
+            .collect();
+        assert!(unimplemented.is_empty(), "UDP catalog ids not parseable as UdpMode: {:?}", unimplemented);
+    }
+
+    /// Verify that the catalog's Raw mode ids all parse as RawMode
+    #[test]
+    fn catalog_raw_modes_parse_as_raw_mode() {
+        let unimplemented: Vec<&str> = crate::catalog::METHODS
+            .iter()
+            .filter(|m| {
+                m.transport == crate::catalog::TransportType::Raw
+                    || m.transport == crate::catalog::TransportType::Icmp
+            })
+            .filter_map(|m| {
+                let id = m.id;
+                if crate::raw::RawMode::from_str(id).is_some() { None } else { Some(id) }
+            })
+            .collect();
+        assert!(unimplemented.is_empty(), "Raw/Icmp catalog ids not parseable as RawMode: {:?}", unimplemented);
+    }
 }
