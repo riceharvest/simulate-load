@@ -40,7 +40,7 @@ pub(crate) enum AttackMode { Bandwidth, SlowRead, ImageOpt, LargePost, AssetSpra
     UnicodeFlood, ParamDuplicate,
     CacheBusterFlood, FileEnumFlood, SoapFlood, SignedHeaderFlood,
     Utf8BomFlood, DoubleDotFlood, EmptyParamFlood, HeaderOrderFlood,
-    CrossDomainFlood, RefererFlood,
+    CrossDomainFlood, RefererFlood, H2RapidReset, CarpetBomb,
 }
 impl std::fmt::Display for AttackMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -133,6 +133,8 @@ impl std::fmt::Display for AttackMode {
             AttackMode::HeaderOrderFlood => write!(f, "Header Order Flood"),
             AttackMode::CrossDomainFlood => write!(f, "Cross Domain Flood"),
             AttackMode::RefererFlood => write!(f, "Referer Flood"),
+            AttackMode::H2RapidReset => write!(f, "HTTP/2 Rapid Reset (CVE-2023-44487)"),
+            AttackMode::CarpetBomb => write!(f, "Multi-Vector Carpet Bombing"),
         }
     }
 }
@@ -226,6 +228,8 @@ impl AttackMode {
             "headerorderflood" => AttackMode::HeaderOrderFlood,
             "crossdomainflood" => AttackMode::CrossDomainFlood,
             "refererflood" => AttackMode::RefererFlood,
+            "h2rapidreset" | "h2-rapid-reset" | "h2reset" => AttackMode::H2RapidReset,
+            "carpetbomb" | "carpet-bomb" | "multivector" => AttackMode::CarpetBomb,
             _ => AttackMode::Normal,
         }
     }

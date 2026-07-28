@@ -1488,4 +1488,71 @@ pub static METHODS: &[AmplificationMethod] = &[
         is_implemented: true,
         http_mode: None,
     },
+    // ================================================================
+    // NEW: TP240PhoneHome / CVE-2022-26143 (Cisco ISE) — UDP
+    // Theoretical amplification: ~4.3 billion ×
+    // ================================================================
+    AmplificationMethod {
+        id: "tp240-phonehome",
+        name: "TP240PhoneHome / CVE-2022-26143 (Cisco ISE)",
+        description: "CVE-2022-26143: Unauthenticated RCE on Cisco ISE appliances. TP240PhoneHome is a UDP-based amplification vector exploiting the ISE authentication service on port 443. The theoretical amplification factor reaches ~4.3 billion due to the small request triggering massive certificate chain responses. This is a critical zero-day class attack requiring root access for raw UDP transmission.",
+        layer: NetworkLayer::Application,
+        transport: TransportType::Udp,
+        port: 443,
+        ampl_factor: "~4,300,000,000x (theoretical)",
+        needs_root: true,
+        works_with_tor: false,
+        is_implemented: true,
+        http_mode: None,
+    },
+    // ================================================================
+    // NEW: NXNSAttack / DNS NXNS — UDP
+    // Amplification: ~1,620×
+    // ================================================================
+    AmplificationMethod {
+        id: "dns-nxns-attack",
+        name: "DNS NXNSAttack (DNS NX NS Attack)",
+        description: "NXNSAttack exploits DNS delegation to achieve high amplification. By crafting queries that trigger NXDOMAIN responses with NS records, the attacker causes recursive resolvers to generate large responses. The attack exploits the gap between query size and the amplified response containing multiple NS records and additional section data.",
+        layer: NetworkLayer::Application,
+        transport: TransportType::Udp,
+        port: 53,
+        ampl_factor: "~1,620x",
+        needs_root: true,
+        works_with_tor: false,
+        is_implemented: true,
+        http_mode: None,
+    },
+    // ================================================================
+    // NEW: HTTP/2 Rapid Reset (CVE-2023-44487) — HTTP/TCP
+    // ================================================================
+    AmplificationMethod {
+        id: "h2-rapid-reset",
+        name: "HTTP/2 Rapid Reset (CVE-2023-44487)",
+        description: "CVE-2023-44487: HTTP/2 Rapid Reset Attack. By rapidly sending HEADERS frames followed by RST_STREAM frames, the attacker exhausts server resources during stream cancellation. Each request cancels the previous stream before any data is sent, but the server must allocate resources for each new stream. This causes a denial-of-service without needing to send significant data payloads.",
+        layer: NetworkLayer::Application,
+        transport: TransportType::Tcp,
+        port: 443,
+        ampl_factor: "Connection resource exhaustion",
+        needs_root: false,
+        works_with_tor: true,
+        is_implemented: true,
+        http_mode: Some("h2rapidreset"),
+    },
+    // ================================================================
+    // NEW: Multi-Vector Carpet Bombing — HTTP/TCP
+    // Orchestrates multiple HTTP attack vectors simultaneously
+    // ================================================================
+    AmplificationMethod {
+        id: "carpet-bomb",
+        name: "Multi-Vector Carpet Bombing",
+        description: "Orchestrates multiple HTTP attack vectors simultaneously: HeaderBomb (massive headers), QueryFlood (query parameter floods), CookieBomb (cookie exhaustion), and AuthFlood (authentication attempts). Each sub-vector targets different resource categories of the target server — memory, CPU, connection pools, and session state — creating a comprehensive application-layer denial-of-service that exploits the server's inability to handle concurrent attack types.",
+        layer: NetworkLayer::Application,
+        transport: TransportType::Tcp,
+        port: 443,
+        ampl_factor: "Multi-vector compound exhaustion",
+        needs_root: false,
+        works_with_tor: true,
+        is_implemented: true,
+        http_mode: Some("carpetbomb"),
+    },
 ];

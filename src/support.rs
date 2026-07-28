@@ -1190,6 +1190,12 @@ pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::M
                         AttackMode::RefererFlood => {
                             fetch_refererflood(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
+                        AttackMode::H2RapidReset => {
+                            fetch_h2rapidreset(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
+                        }
+                        AttackMode::CarpetBomb => {
+                            fetch_carpetbomb(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
+                        }
                     };
                     let latency = start_req.elapsed().as_millis() as u64;
                     stats_clone.latency_samples.record(latency as u32);
