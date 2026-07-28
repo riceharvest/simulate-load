@@ -4051,8 +4051,10 @@ async fn main() {
             "bacnet" | "bacnet-discovery" | "bacnet-device" => udp::UdpMode::BacnetDiscovery,
             "ntp-readvar" | "ntpreadvar" => udp::UdpMode::NtpReadVar,
             "dns-dnssec" | "dnssec" | "dnssec-query" => udp::UdpMode::DnsDnssec,
+            "dns-recursive" | "dns-recursive-chain" | "recursive-dns" => udp::UdpMode::DnsRecursiveChain,
+            "udp-flood" => udp::UdpMode::UdpFlood,
             _ => {
-                eprintln!("Unknown UDP amplification mode: {}. Available: dns-any, dns-ixfr, ntp-monlist, ntp-query, memcached, memcached-get, ssdp, snmp-getbulk, chargen, qotd, generic, cldap, coap, ws-discovery, portmap, netbios, mdns, tftp, sip, ike, rip, bacnet, ntp-readvar, dnssec", udp_mode_str);
+                eprintln!("Unknown UDP amplification mode: {}. Available: dns-any, dns-ixfr, ntp-monlist, ntp-query, memcached, memcached-get, ssdp, snmp-getbulk, chargen, qotd, generic, cldap, coap, ws-discovery, portmap, netbios, mdns, tftp, sip, ike, rip, bacnet, ntp-readvar, dnssec, dns-recursive, udp-flood", udp_mode_str);
                 return;
             }
         };

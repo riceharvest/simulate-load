@@ -977,9 +977,9 @@ pub static METHODS: &[AmplificationMethod] = &[
         transport: TransportType::Udp,
         port: 123,
         ampl_factor: "20-50x",
-        needs_root: true,
+        needs_root: false,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1263,9 +1263,9 @@ pub static METHODS: &[AmplificationMethod] = &[
         transport: TransportType::Udp,
         port: 47808,
         ampl_factor: "3-8x per device",
-        needs_root: true,
+        needs_root: false,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1320,7 +1320,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "10-100x (downstream chain)",
         needs_root: false,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1333,7 +1333,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "5-50x per trigger",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     AmplificationMethod {
@@ -1359,7 +1359,7 @@ pub static METHODS: &[AmplificationMethod] = &[
         ampl_factor: "3-10x per chain hop",
         needs_root: false,
         works_with_tor: true,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     // ================================================================
@@ -1412,9 +1412,9 @@ pub static METHODS: &[AmplificationMethod] = &[
         transport: TransportType::Udp,
         port: 0,
         ampl_factor: "1x (pure bandwidth)",
-        needs_root: true,
+        needs_root: false,
         works_with_tor: false,
-        is_implemented: false,
+        is_implemented: true,
         http_mode: None,
     },
     // ================================================================

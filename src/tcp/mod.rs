@@ -29,6 +29,8 @@ pub enum TcpMode {
     PostgresMd5Auth,
     CassandraThrift,
     ArdQuery,
+    CupsIppTrigger,
+    WebhookChain,
 }
 
 impl TcpMode {
@@ -59,6 +61,8 @@ impl TcpMode {
             TcpMode::PostgresMd5Auth => "PostgreSQL MD5 auth amplification",
             TcpMode::CassandraThrift => "Cassandra Thrift amplification",
             TcpMode::ArdQuery => "Apple Remote Desktop query",
+            TcpMode::CupsIppTrigger => "CUPS IPP trigger amplification",
+            TcpMode::WebhookChain => "Webhook chain triggered amplification",
         }
     }
 
@@ -86,6 +90,8 @@ impl TcpMode {
             TcpMode::PostgresMd5Auth => 5432,
             TcpMode::CassandraThrift => 9042,
             TcpMode::ArdQuery => 3283,
+            TcpMode::CupsIppTrigger => 631,
+            TcpMode::WebhookChain => 443,
         }
     }
 
@@ -116,6 +122,8 @@ impl TcpMode {
             "postgres" | "postgres-md5" | "postgresql-md5" => Some(TcpMode::PostgresMd5Auth),
             "cassandra" | "cassandra-thrift" => Some(TcpMode::CassandraThrift),
             "ard" | "ard-query" | "ardp" => Some(TcpMode::ArdQuery),
+            "cups" | "cups-ipp" | "cups-ipp-trigger" => Some(TcpMode::CupsIppTrigger),
+            "webhook" | "webhook-chain" => Some(TcpMode::WebhookChain),
             _ => None,
         }
     }
@@ -245,6 +253,8 @@ async fn run_protocol(mode: TcpMode, host: &str, port: u16, proxy: Option<&str>)
             TcpMode::PostgresMd5Auth => postgres_md5(&mut stream, &mut buf).await?,
             TcpMode::CassandraThrift => cassandra_thrift(&mut stream, &mut buf).await?,
             TcpMode::ArdQuery => ard_query(&mut stream, &mut buf).await?,
+            TcpMode::CupsIppTrigger => cups_ipp_trigger(&mut stream, &mut buf).await?,
+            TcpMode::WebhookChain => webhook_chain(&mut stream, &mut buf).await?,
         };
         Ok::<(usize, usize), String>((sent, recv))
     }).await;
@@ -1367,6 +1377,125 @@ async fn ard_query(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usi
     ];
     stream.write_all(&auth_query).await.ok();
     sent += auth_query.len();
+
+    let timeout = tokio::time::sleep(Duration::from_secs(3));
+    tokio::select! {
+        n = stream.read(buf) => {
+            if let Ok(n) = n { recv += n; }
+        }
+        _ = timeout => {}
+    }
+
+    Ok((sent, recv))
+}
+
+
+// ================================================================
+// CUPS IPP Trigger Amplification - port 631
+// Sends IPP (Internet Printing Protocol) request to CUPS server.
+// The server processes the print job metadata and responds with
+// full job attributes. Amplification via server-side processing.
+// ================================================================
+async fn cups_ipp_trigger(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usize), String> {
+    let mut sent = 0;
+    let mut recv = 0;
+
+    // Read initial response
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    // IPP 2.0 Get-Printer-Attributes request
+    let mut ipp = Vec::new();
+    // Version 2.0 (0x02, 0x00)
+    ipp.extend_from_slice(&[0x02, 0x00]);
+    // Operation: Get-Printer-Attributes (0x000B)
+    ipp.extend_from_slice(&[0x00, 0x0B]);
+    // Request ID
+    ipp.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+    // Operation attributes
+    // charset (0x47)
+    ipp.extend_from_slice(&[0x01, 0x47, 0x00, 0x12, b'a', b't', b't', b'r', b'i', b'b', b'u', b't', b'e', b's', b'-', b'c', b'h', b'a', b'r', b's', b'e', b't']);
+    ipp.extend_from_slice(&[0x00, 0x05, b'u', b't', b'f', b'-', b'8']);
+    // printer-uri (0x45)
+    ipp.extend_from_slice(&[0x01, 0x45, 0x00, 0x0b, b'p', b'r', b'i', b'n', b't', b'e', b'r', b'-', b'u', b'r', b'i']);
+    let printer_uri = b"ipp://localhost:631/printers/test";
+    ipp.push((printer_uri.len() + 2) as u8);
+    ipp.push(0x00);
+    ipp.extend_from_slice(printer_uri);
+    // End of attributes
+    ipp.push(0x03);
+
+    let request = format!("POST /ipp/print HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/ipp\r\n\r\n", ipp.len());
+    stream.write_all(request.as_bytes()).await.map_err(|e| e.to_string())?;
+    sent += request.len();
+    stream.write_all(&ipp).await.map_err(|e| e.to_string())?;
+    sent += ipp.len();
+
+    // Read response
+    let timeout = tokio::time::sleep(Duration::from_secs(5));
+    tokio::select! {
+        n = stream.read(buf) => {
+            if let Ok(n) = n { recv += n; }
+        }
+        _ = timeout => {}
+    }
+
+    // Create-Job for additional amplification
+    let req2 = "POST /ipp/print HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\nContent-Type: application/ipp\r\n\r\n\x02\x00\x00\x05\x00\x00\x00\x02\x01\x47\x00\x12attributes-charset\x00\x05utf-8\x03";
+    stream.write_all(req2.as_bytes()).await.ok();
+    sent += req2.len();
+
+    let timeout = tokio::time::sleep(Duration::from_secs(3));
+    tokio::select! {
+        n = stream.read(buf) => {
+            if let Ok(n) = n { recv += n; }
+        }
+        _ = timeout => {}
+    }
+
+    Ok((sent, recv))
+}
+
+// ================================================================
+// Webhook Chain Trigger - port 443
+// Sends HTTP POST request with JSon payload to webhook listener.
+// If the webhook is configured to call other webhooks, this can
+// trigger a chain reaction of server-side processing.
+// ================================================================
+async fn webhook_chain(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(usize, usize), String> {
+    let mut sent = 0;
+    let mut recv = 0;
+
+    // Read initial response
+    let n = stream.read(buf).await.map_err(|e| e.to_string())?;
+    recv += n;
+
+    // Send HTTP POST with typical webhook body format
+    let body = r#"{"event":"push","repository":{"name":"test","full_name":"test/test"},"commits":[{"id":"abc123"}]}"#;
+    let req = format!(
+        "POST /hooks/test HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nX-GitHub-Event: push\r\nX-Hub-Signature: sha1=abc123\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    );
+    stream.write_all(req.as_bytes()).await.map_err(|e| e.to_string())?;
+    sent += req.len();
+
+    // Read response
+    let timeout = tokio::time::sleep(Duration::from_secs(5));
+    tokio::select! {
+        n = stream.read(buf) => {
+            if let Ok(n) = n { recv += n; }
+        }
+        _ = timeout => {}
+    }
+
+    // Also try with different webhook format (Slack-style)
+    let body2 = r#"{"text":"test message","attachments":[{"title":"Test","text":"Chain trigger"}]}"#;
+    let req2 = format!(
+        "POST /webhook HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body2.len(), body2
+    );
+    stream.write_all(req2.as_bytes()).await.ok();
+    sent += req2.len();
 
     let timeout = tokio::time::sleep(Duration::from_secs(3));
     tokio::select! {
