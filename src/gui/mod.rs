@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::catalog::{AmplificationMethod, METHODS, TransportType};
+use crate::types::discover_multi_tor;
 
 pub enum GuiAction {
     Quit,
@@ -255,7 +256,8 @@ impl GuiApp {
                 Constraint::Length(1),
                 Constraint::Length(3),
                 Constraint::Min(8),
-                Constraint::Length(9),
+                Constraint::Length(7),
+                Constraint::Length(3),
             ])
             .split(f.area());
 
@@ -386,6 +388,29 @@ impl GuiApp {
             let desc = Paragraph::new("No method selected")
                 .block(Block::default().borders(Borders::ALL).title("Description"));
             f.render_widget(desc, main_chunks[3]);
+        }
+
+        // Multi-Tor instances status
+        {
+            let tor_instances = discover_multi_tor();
+            if !tor_instances.is_empty() {
+                let mut tor_lines: Vec<Line> = Vec::new();
+                for inst in &tor_instances {
+                    let status_color = if inst.alive { Color::Green } else { Color::Red };
+                    let status_text = if inst.alive { "ONLINE" } else { "STOPPED" };
+                    tor_lines.push(Line::from(vec![
+                        Span::styled(
+                            if inst.alive { "● " } else { "○ " },
+                            Style::default().fg(status_color),
+                        ),
+                        Span::raw(format!(":{} → {}  ", inst.socks_port, inst.country)),
+                        Span::styled(status_text, Style::default().fg(status_color)),
+                    ]));
+                }
+                let tor_block = Paragraph::new(Text::from(tor_lines))
+                    .block(Block::default().borders(Borders::ALL).title("Tor Instances"));
+                f.render_widget(tor_block, main_chunks[4]);
+            }
         }
     }
 }

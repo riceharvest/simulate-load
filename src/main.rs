@@ -1368,8 +1368,21 @@ async fn main() {
                             }
                         }
                     }
-                    println!("================================================================================");
-                } else if !quiet {
+                    // Multi-Tor instances (TUI)
+                    {
+                        let tor_instances = discover_multi_tor();
+                        if !tor_instances.is_empty() {
+                            println!("   [Tor Instances]");
+                            for inst in &tor_instances {
+                                let status_char = if inst.alive { "●" } else { "○" };
+                                println!("   {} :{:<5} → {}  Status: {}",
+                                    status_char, inst.socks_port, inst.country,
+                                    if inst.alive { "ONLINE" } else { "STOPPED" }
+                                );
+                            }
+                        }
+                    }
+                    println!("================================================================================\n");
                     println!(
                         "  [Elapsed: {}s] {:.1} req/s | {:.2} KB/s | Latency: {:.1}ms (p50: {}ms, p99: {}ms) | 2xx: {} | 3xx: {} | 4xx: {} | 5xx: {} | Errors: {} (Timeout: {}, Connect: {}, Other: {})",
                         elapsed, req_rate, byte_rate, avg_latency, p50, p99,

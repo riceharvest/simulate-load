@@ -477,3 +477,85 @@ pub(crate) struct ResultsCsvParams<'a> {
     pub(crate) total_bytes: u64,
     pub(crate) duration: u64,
 }
+
+// ── Multi-Tor instance discovery ──────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct TorInstance {
+    pub(crate) socks_port: u16,
+    pub(crate) control_port: u16,
+    pub(crate) country: String,
+    pub(crate) pid: Option<u32>,
+    pub(crate) alive: bool,
+}
+
+/// Read multi-Tor instances from ~/.tor/multi/.
+/// Returns an empty vec if the setup is not running.
+pub(crate) fn discover_multi_tor() -> Vec<TorInstance> {
+    let base = match std::env::var("HOME") {
+        Ok(h) => format!("{}/.tor/multi", h),
+        Err(_) => return vec![],
+    };
+
+    let proxy_file = format!("{}/proxies.txt", base);
+    let content = match std::fs::read_to_string(&proxy_file) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    let mut instances = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Parse socks5h://127.0.0.1:19050
+        let port: u16 = match line.split(':').last().and_then(|s| s.parse().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let idx = (port.saturating_sub(19050) / 2) + 1;
+        let inst_dir = format!("{}/instance{}", base, idx);
+
+        // Read torrc for ExitNodes country
+        let torrc_path = format!("{}/torrc", inst_dir);
+        let country = std::fs::read_to_string(&torrc_path)
+            .ok()
+            .and_then(|content| {
+                content
+                    .lines()
+                    .find(|l| l.trim().starts_with("ExitNodes"))
+                    .and_then(|l| l.trim().split_whitespace().nth(1))
+                    .map(|s| s.trim_matches(|c| c == '{' || c == '}').to_string())
+            })
+            .unwrap_or_else(|| "?".to_string());
+
+        let control_port = port + 1;
+        let pid_path = format!("{}/pid", inst_dir);
+        let (pid, alive) = match std::fs::read_to_string(&pid_path) {
+            Ok(pid_str) => {
+                let pid_num: u32 = pid_str.trim().parse().unwrap_or(0);
+                let is_alive = if pid_num > 0 {
+                    // Check if process is alive on Linux
+                    std::path::Path::new(&format!("/proc/{}", pid_num)).exists()
+                } else {
+                    false
+                };
+                (Some(pid_num), is_alive)
+            }
+            Err(_) => (None, false),
+        };
+
+        instances.push(TorInstance {
+            socks_port: port,
+            control_port,
+            country,
+            pid,
+            alive,
+        });
+    }
+
+    instances
+}
