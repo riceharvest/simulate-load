@@ -68,6 +68,7 @@ fn print_help() {
     println!("  --user-agent UA       Custom User-Agent header");
     println!("  --auto-tune           Enable PID controller concurrency auto-tuning");
     println!("  --tui                 Enable interactive console dashboard");
+    println!("  --detect-waf          Detect WAF type and auto-apply bypass strategies");
     println!("  --gui                 Launch amplification methods browser (TUI)");
     println!("  --trigger <port>      Start a trigger amplifier listener on a UDP port");
     println!("  --config F            Load configuration from file");
@@ -120,9 +121,11 @@ mod udp;
 mod raw;
 mod gui;
 mod trigger;
+mod waf;
 use crate::types::*;
 use crate::http::*;
 use crate::support::*;
+use crate::waf::*;
 
 fn print_list_modes() {
     use crate::catalog::METHODS;
@@ -199,6 +202,7 @@ async fn main() {
     let mut jitter_percent: Option<u64> = None;
     let mut auto_tune = false;
     let mut tui = false;
+    let mut detect_waf_flag = false;
     let mut protocol = String::from("http");
     let mut insecure = false;
     let mut spoof_ip = false;
@@ -359,6 +363,7 @@ async fn main() {
             }
             "--auto-tune" => auto_tune = true,
             "--tui" => tui = true,
+            "--detect-waf" => detect_waf_flag = true,
             "--protocol" => {
                 if let Some(val) = args_iter.next() {
                     protocol = val;
@@ -421,6 +426,8 @@ async fn main() {
                     auto_tune = true;
                 } else if other == "--tui" {
                     tui = true;
+                } else if other == "--detect-waf" {
+                    detect_waf_flag = true;
                 } else if other == "--spoof-ip" {
                     spoof_ip = true;
                 } else if other == "--quiet" {
@@ -539,6 +546,7 @@ async fn main() {
                         "jitter" | "jitter_ms" => if let Ok(parsed) = val.parse() { jitter_ms = parsed; },
                         "auto_tune" => auto_tune = val.parse().unwrap_or(false),
                         "tui" => tui = val.parse().unwrap_or(false),
+                        "detect_waf" | "detect-waf" => detect_waf_flag = val.parse().unwrap_or(false),
                         "spoof_ip" => spoof_ip = val.parse().unwrap_or(false),
                         "quiet" => quiet = val.parse().unwrap_or(false),
                         "json" => json_output = val.parse().unwrap_or(false),
@@ -744,6 +752,29 @@ async fn main() {
         if let Err(e) = probe_domain(&target_url, &state).await {
             eprintln!("  Failed to probe domain: {}", e);
         }
+
+        // WAF detection (if requested)
+        if detect_waf_flag {
+            println!("[WAF] Detecting WAF type...");
+            let waf_profile = detect_waf(&target_url, &config).await;
+            {
+                let st = state.lock().await;
+                let mut guard = st.waf_profile.lock();
+                if let Ok(ref mut waf) = guard {
+                    **waf = waf_profile.clone();
+                }
+            }
+            if waf_profile.confidence > 0.0 {
+                println!("  WAF Detected: {} (confidence: {:.0}%)", waf_profile.waf_type, waf_profile.confidence * 100.0);
+                if !waf_profile.detected_signatures.is_empty() {
+                    for sig in &waf_profile.detected_signatures {
+                        println!("    └─ {}", sig);
+                    }
+                }
+            } else {
+                println!("  No WAF detected or unable to determine WAF type.");
+            }
+        }
         let status = {
             let st = state.lock().await;
             st.probe_status.clone()
@@ -758,9 +789,10 @@ async fn main() {
         println!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return;
     }
-    print_list_modes();
+    if positional.is_empty() {
+        print_list_modes();
         return;
-    
+    }
 
     println!("Mode: {} (proxy: {})", attack_str, mode_str);
     println!("Concurrency: {}  Duration: {}s", concurrency, duration_secs);
@@ -821,6 +853,31 @@ async fn main() {
     };
     println!("  {}", status);
     println!();
+
+    // WAF detection (if requested)
+    if detect_waf_flag {
+        println!("[WAF] Detecting WAF type...");
+        let waf_profile = detect_waf(&target_url, &config).await;
+        {
+            let st = state.lock().await;
+            let mut guard = st.waf_profile.lock();
+            if let Ok(ref mut waf) = guard {
+                **waf = waf_profile.clone();
+            }
+        }
+        if waf_profile.confidence > 0.0 {
+            println!("  WAF Detected: {} (confidence: {:.0}%)", waf_profile.waf_type, waf_profile.confidence * 100.0);
+            if !waf_profile.detected_signatures.is_empty() {
+                for sig in &waf_profile.detected_signatures {
+                    println!("    └─ {}", sig);
+                }
+            }
+        } else {
+            println!("  No WAF detected or unable to determine WAF type.");
+        }
+        println!();
+    }
+
     println!("[2/3] Acquiring proxies...");
     // Handle --proxy-file and --tor-proxy first (bypass scraping)
     let proxies = if let Some(path) = &proxy_file {
@@ -1300,7 +1357,18 @@ async fn main() {
                     println!("   Error Rate Threshold: {:.1}% ({})", err_pct, if safety.2 < 1.0 { "ACTIVE" } else { "disabled" });
                     let throughput_display = if safety.3 > 0.0 { safety.3 } else { 0.0 };
                     println!("   Throughput Cap: {:.1} Mbps ({})", throughput_display, if safety.3 > 0.0 { "ACTIVE" } else { "disabled" });
-                    println!("========================================================================");
+                    // WAF profile display (TUI)
+                    if let Ok(waf) = state.lock().await.waf_profile.lock() {
+                        if waf.confidence > 0.0 {
+                            println!("   [WAF Profile]");
+                            println!("   Type: {} (confidence: {:.0}%)", waf.waf_type, waf.confidence * 100.0);
+                            for sig in &waf.detected_signatures {
+                                let truncated = if sig.len() > 55 { format!("{}...", &sig[..55]) } else { sig.clone() };
+                                println!("     └─ {}", truncated);
+                            }
+                        }
+                    }
+                    println!("================================================================================");
                 } else if !quiet {
                     println!(
                         "  [Elapsed: {}s] {:.1} req/s | {:.2} KB/s | Latency: {:.1}ms (p50: {}ms, p99: {}ms) | 2xx: {} | 3xx: {} | 4xx: {} | 5xx: {} | Errors: {} (Timeout: {}, Connect: {}, Other: {})",
@@ -1372,6 +1440,18 @@ async fn main() {
                         if st.concurrency_max > 0 { st.concurrency_max } else { 0 }, if st.concurrency_max > 0 { "ACTIVE" } else { "disabled" },
                         st.error_rate_threshold * 100.0, if st.error_rate_threshold < 1.0 { "ACTIVE" } else { "disabled" },
                         st.throughput_cap_mbps, if st.throughput_cap_mbps > 0.0 { "ACTIVE" } else { "disabled" });
+                    // Print WAF profile (if detected)
+                    {
+                        let guard = st.waf_profile.lock();
+                        if let Ok(waf) = guard {
+                            if waf.confidence > 0.0 {
+                                println!("  WAF Profile: {} (confidence: {:.0}%)", waf.waf_type, waf.confidence * 100.0);
+                                for sig in &waf.detected_signatures {
+                                    println!("    └─ {}", sig);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             if let Some(ref log_path) = log_file {
@@ -1440,6 +1520,12 @@ async fn main() {
                         "concurrency_max": state_guard.concurrency_max,
                         "error_rate_threshold": state_guard.error_rate_threshold,
                         "throughput_cap_mbps": state_guard.throughput_cap_mbps
+                    },
+                    "waf_profile": {
+                        "waf_type": state_guard.waf_profile.lock().map(|w| w.waf_type.to_string()).unwrap_or_default(),
+                        "confidence": state_guard.waf_profile.lock().map(|w| w.confidence).unwrap_or(0.0),
+                        "detected_signatures": state_guard.waf_profile.lock().map(|w| w.detected_signatures.clone()).unwrap_or_default(),
+                        "bypass_recommendations": state_guard.waf_profile.lock().map(|w| w.bypass_recommendations.clone()).unwrap_or_default()
                     },
                     "proxies": prox_list,
                     "sessions": sessions

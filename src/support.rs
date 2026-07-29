@@ -309,6 +309,7 @@ impl AppState {
         concurrency_max: 0,
         error_rate_threshold: 1.0,
         throughput_cap_mbps: 0.0,
+        waf_profile: std::sync::Arc::new(std::sync::Mutex::new(crate::types::WafProfile::default())),
     }}
 }
 

@@ -405,6 +405,64 @@ pub(crate) struct AppState {
     pub(crate) concurrency_max: usize,
     pub(crate) error_rate_threshold: f64,
     pub(crate) throughput_cap_mbps: f64,
+    // WAF profiling
+    pub(crate) waf_profile: std::sync::Arc<std::sync::Mutex<WafProfile>>,
+}
+
+
+// ── WAF Profiling ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum WafType {
+    #[allow(dead_code)]
+    None,
+    Unknown,
+    Cloudflare,
+    Akamai,
+    AwsWaf,
+    Fastly,
+    ModSecurity,
+    Imperva,
+    Sucuri,
+    F5BigIp,
+    Radware,
+}
+
+impl std::fmt::Display for WafType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WafType::None => write!(f, "None"),
+            WafType::Unknown => write!(f, "Unknown"),
+            WafType::Cloudflare => write!(f, "Cloudflare"),
+            WafType::Akamai => write!(f, "Akamai"),
+            WafType::AwsWaf => write!(f, "AWS WAF"),
+            WafType::Fastly => write!(f, "Fastly"),
+            WafType::ModSecurity => write!(f, "ModSecurity"),
+            WafType::Imperva => write!(f, "Imperva/Incapsula"),
+            WafType::Sucuri => write!(f, "Sucuri"),
+            WafType::F5BigIp => write!(f, "F5 BIG-IP ASM"),
+            WafType::Radware => write!(f, "Radware"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WafProfile {
+    pub(crate) waf_type: WafType,
+    pub(crate) confidence: f64,
+    pub(crate) bypass_recommendations: Vec<String>,
+    pub(crate) detected_signatures: Vec<String>,
+}
+
+impl Default for WafProfile {
+    fn default() -> Self {
+        WafProfile {
+            waf_type: WafType::Unknown,
+            confidence: 0.0,
+            bypass_recommendations: Vec::new(),
+            detected_signatures: Vec::new(),
+        }
+    }
 }
 
 // ── CSV export parameters ─────────────────────────────────────────────────────
