@@ -1,5 +1,6 @@
 use crate::types::*;
 use crate::http::*;
+use crate::proto::*;
 use rand::prelude::*;
 use rand::distr::{Distribution, weighted::WeightedIndex};
 use reqwest::{Client, RequestBuilder};
@@ -257,6 +258,25 @@ impl LatencySamples {
     }
 }
 
+/// Compute (p50, p90, p95, p99) from an owned slice of latency samples.
+/// Used for per-interval time-series snapshots: the caller drains the
+/// interval_latency buffer each tick and passes the drained batch here, so
+/// each point reflects only that interval's requests (the real degradation
+/// curve), not the whole-run rolling buffer.
+pub(crate) fn percentiles_from(samples: &mut [u32]) -> (u32, u32, u32, u32) {
+    if samples.is_empty() {
+        return (0, 0, 0, 0);
+    }
+    samples.sort_unstable();
+    let len = samples.len();
+    (
+        samples[len * 50 / 100],
+        samples[len * 90 / 100],
+        samples[len * 95 / 100],
+        samples[len * 99 / 100],
+    )
+}
+
 
 impl Stats {
     pub(crate) fn new() -> Self {
@@ -276,6 +296,7 @@ impl Stats {
             status_other: Arc::new(AtomicU64::new(0)),
             status_hist: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
             latency_samples: Arc::new(LatencySamples::new(16384)),
+            interval_latency: Arc::new(std::sync::Mutex::new(Vec::with_capacity(4096))),
             concurrency: Arc::new(AtomicUsize::new(20)),
             abort: Arc::new(AtomicBool::new(false)),
         }
@@ -310,6 +331,7 @@ impl AppState {
         error_rate_threshold: 1.0,
         throughput_cap_mbps: 0.0,
         waf_profile: std::sync::Arc::new(std::sync::Mutex::new(crate::types::WafProfile::default())),
+        use_crawl: false,
     }}
 }
 
@@ -827,9 +849,9 @@ pub(crate) async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -
 
 
 pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::Mutex<ProxyPool>>, stats: Stats, delay_ms: u64, max_errors: Option<u64>) {
-    let (mut conc, interval, attack, sessions, _, apis, _statics, rate_limit, verbose, max_retries, jitter_percent) = {
+    let (mut conc, interval, attack, sessions, _, apis, _statics, rate_limit, verbose, max_retries, jitter_percent, insecure, use_crawl) = {
         let st = state.lock().await;
-        (st.load_concurrency, st.interval_ms, st.attack_mode, st.sessions.clone(), st.jitter_ms, st.apis.clone(), st.statics.clone(), st.rate_limit, st.verbose, st.max_retries, st.jitter_percent)
+        (st.load_concurrency, st.interval_ms, st.attack_mode, st.sessions.clone(), st.jitter_ms, st.apis.clone(), st.statics.clone(), st.rate_limit, st.verbose, st.max_retries, st.jitter_percent, st.client_config.insecure, st.use_crawl)
     };
     
     // Safety controls
@@ -919,13 +941,24 @@ pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::M
             let st = state.lock().await; (st.imgs.clone(), st.apis.clone(), st.statics.clone(), st.has_isr, st.has_cache_bypass, st.has_log_drains, st.has_storage)
         };
         tokio::task::yield_now().await;
-        let assets: Arc<Vec<String>> = Arc::new(match attack {
+        let assets: Arc<Vec<String>> = Arc::new(if use_crawl {
+            // #7 (--crawl): every attack mode targets the full discovered
+            // surface (imgs + apis + statics) instead of just "/".
+            let mut all = imgs.clone();
+            all.extend(apis_local.iter().cloned());
+            all.extend(statics_local.iter().cloned());
+            all.sort();
+            all.dedup();
+            if all.is_empty() { vec!["/".into()] } else { all }
+        } else {
+            match attack {
             AttackMode::Normal => { if statics_local.is_empty() { vec!["/".into()] } else { statics_local.clone() } },
             AttackMode::ImageOpt => { if imgs.is_empty() { vec!["/".into()] } else { imgs.clone() } },
             AttackMode::Ssr => { if apis_local.is_empty() { vec!["/".into()] } else { apis_local.clone() } },
             AttackMode::Middleware => { if statics_local.is_empty() { vec!["/".into()] } else { statics_local.clone() } },
             AttackMode::AssetSpray => { if statics_local.is_empty() { vec!["/".into()] } else { statics_local.clone() } },
             _ => vec!["/".into()]
+            }
         });
 
         loop {
@@ -1270,9 +1303,20 @@ pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::M
                         AttackMode::CarpetBomb => {
                             fetch_carpetbomb(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
+                        AttackMode::WebSocketFlood => {
+                            // Real WS handshake + 100 binary frames per tick (direct to target).
+                            fetch_websocket_flood(target.clone(), req_delay, verbose, insecure, 100).await
+                        }
+                        AttackMode::H2StreamFlood => {
+                            // Real HTTP/2 multiplexing: 50 concurrent streams per tick (direct to target).
+                            fetch_h2_stream_flood(target.clone(), req_delay, verbose, insecure, 50).await
+                        }
                     };
                     let latency = start_req.elapsed().as_millis() as u64;
                     stats_clone.latency_samples.record(latency as u32);
+                    if let Ok(mut g) = stats_clone.interval_latency.lock() {
+                        g.push(latency as u32);
+                    }
                     
                     match result {
                         Ok((bytes, status)) => {
@@ -1351,6 +1395,30 @@ pub(crate) fn write_probe_csv(path: &str, target: &str, status: &str, proxies: &
     }
 }
 
+/// Write the per-interval latency time-series to CSV. One row per stats
+/// interval with the percentile snapshot for that window — this is the
+/// degradation curve (p99 rising over time) that a single whole-run
+/// percentile set hides.
+pub(crate) fn write_timeseries_csv(path: &str, points: &[crate::types::TimeSeriesPoint]) {
+    use std::io::Write;
+    let mut out = String::from("elapsed_s,requests,errors,bytes,p50_ms,p90_ms,p95_ms,p99_ms\n");
+    for p in points {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{}\n",
+            p.elapsed_secs, p.req_count, p.error_count, p.bytes, p.p50, p.p90, p.p95, p.p99
+        ));
+    }
+    match std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(out.as_bytes()) {
+                eprintln!("  Failed to write time-series CSV to {}: {}", path, e);
+            } else {
+                println!("  Time-series CSV written to {} ({} points)", path, points.len());
+            }
+        }
+        Err(e) => eprintln!("  Failed to open time-series CSV {}: {}", path, e),
+    }
+}
 
 pub(crate) fn write_results_csv(path: &str, params: ResultsCsvParams<'_>) {
     let status_escaped = params.status.replace(',', ";");

@@ -41,6 +41,7 @@ pub(crate) enum AttackMode { Bandwidth, SlowRead, ImageOpt, LargePost, AssetSpra
     CacheBusterFlood, FileEnumFlood, SoapFlood, SignedHeaderFlood,
     Utf8BomFlood, DoubleDotFlood, EmptyParamFlood, HeaderOrderFlood,
     CrossDomainFlood, RefererFlood, H2RapidReset, CarpetBomb,
+    WebSocketFlood, H2StreamFlood,
 }
 impl std::fmt::Display for AttackMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -135,6 +136,8 @@ impl std::fmt::Display for AttackMode {
             AttackMode::RefererFlood => write!(f, "Referer Flood"),
             AttackMode::H2RapidReset => write!(f, "HTTP/2 Rapid Reset (CVE-2023-44487)"),
             AttackMode::CarpetBomb => write!(f, "Multi-Vector Carpet Bombing"),
+            AttackMode::WebSocketFlood => write!(f, "WebSocket Frame Flood"),
+            AttackMode::H2StreamFlood => write!(f, "HTTP/2 Stream Multiplex Flood"),
         }
     }
 }
@@ -230,6 +233,8 @@ impl AttackMode {
             "refererflood" => AttackMode::RefererFlood,
             "h2rapidreset" | "h2-rapid-reset" | "h2reset" => AttackMode::H2RapidReset,
             "carpetbomb" | "carpet-bomb" | "multivector" => AttackMode::CarpetBomb,
+            "websocketflood" | "websocket" | "wsflood" | "ws-flood" => AttackMode::WebSocketFlood,
+            "h2streamflood" | "h2stream" | "h2-multiplex" | "h2multiplex" => AttackMode::H2StreamFlood,
             _ => AttackMode::Normal,
         }
     }
@@ -393,8 +398,28 @@ pub(crate) struct Stats {
     pub(crate) status_other: Arc<AtomicU64>,
     pub(crate) status_hist: Arc<[AtomicU64; 900]>,
     pub(crate) latency_samples: Arc<LatencySamples>,
+    // Per-interval latency collector for time-series export. Each request
+    // pushes its latency here; the status loop drains it every tick.
+    pub(crate) interval_latency: Arc<std::sync::Mutex<Vec<u32>>>,
     pub(crate) concurrency: Arc<AtomicUsize>,
     pub(crate) abort: Arc<AtomicBool>,
+}
+
+// ── Time-series snapshot ─────────────────────────────────────────────────────
+
+/// A single point in the latency time-series: the percentile snapshot taken
+/// over one stats interval. Emitted to CSV (--timeseries-csv) and JSON output
+/// so the degradation curve (e.g. p99 rising over time) can be charted.
+#[derive(Clone, Debug)]
+pub(crate) struct TimeSeriesPoint {
+    pub(crate) elapsed_secs: u64,
+    pub(crate) req_count: u64,
+    pub(crate) error_count: u64,
+    pub(crate) bytes: u64,
+    pub(crate) p50: u32,
+    pub(crate) p90: u32,
+    pub(crate) p95: u32,
+    pub(crate) p99: u32,
 }
 
 // ── Application state ─────────────────────────────────────────────────────────
@@ -453,6 +478,9 @@ pub(crate) struct AppState {
     pub(crate) throughput_cap_mbps: f64,
     // WAF profiling
     pub(crate) waf_profile: std::sync::Arc<std::sync::Mutex<WafProfile>>,
+    // Crawl-to-attack: when true, every attack mode targets the discovered
+    // URLs (imgs+apis+statics) from probing, not just "/".
+    pub(crate) use_crawl: bool,
 }
 
 

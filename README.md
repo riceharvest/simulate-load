@@ -1,7 +1,7 @@
 # simulate-load — DoS/Amplification Vector Simulation Tool
 
 A multi-protocol network simulation tool for authorized security testing.
-107 attack modes across 4 OSI layers, Tor integration, TUI browser, and
+113 attack modes across 4 OSI layers, Tor integration, TUI browser, and
 trigger amplifier support.
 
 > **For authorized security testing only. Do not use against systems
@@ -9,8 +9,9 @@ trigger amplifier support.
 
 ## Features
 
-- **107 attack modes** across L4-L7:
-  - 88 HTTP amplification vectors (GET, POST, slow-read, bandwidth, etc.)
+- **113 attack modes** across L4-L7:
+  - 90 HTTP amplification vectors (GET, POST, slow-read, bandwidth, WebSocket
+    frame flood, HTTP/2 stream multiplexing, etc.)
   - 28 TCP protocols (DNS ANY TCP, NTP, SNMP, SSDP, Memcached, Redis, …)
   - 30 UDP protocols (DNS ANY UDP, CharGen, QOTD, CLDAP, CoAP, WS-Discovery, …)
   - 8 raw socket protocols (SYN flood, RST flood, ICMP Smurf, ARP flood, …)
@@ -21,7 +22,7 @@ trigger amplifier support.
   launch attacks with Enter
 - **Trigger amplifier** (`--trigger <port>`) — UDP listener that reflects
   amplified payloads back to the source
-- **`--list-modes`** — print all 107 modes with layer, amplification factor,
+- **`--list-modes`** — print all 113 modes with layer, amplification factor,
   and root requirements
 - **No root required** — Userspace UDP sockets, Tor-routed TCP, HTTP proxies
 - **`--auto-tune`** — PID controller concurrency auto-tuning
@@ -66,9 +67,9 @@ sudo ./target/release/simulate_load_rust --protocol raw 192.168.1.1:0 tcp-syn-fl
 ./target/release/simulate_load_rust --list-modes
 ```
 
-## All 107 Attack Modes
+## All 113 Attack Modes
 
-### L7 Application — HTTP (88 modes)
+### L7 Application — HTTP (90 modes)
 
 | Mode ID | Description |
 |---------|-------------|
@@ -84,7 +85,9 @@ sudo ./target/release/simulate_load_rust --protocol raw 192.168.1.1:0 tcp-syn-fl
 | `middleware` | Edge/middleware endpoint stress |
 | `requestflood` | No-delay request flood |
 | `notfound` | 404 storm on random paths |
-| (76 more in the catalog — see `--list-modes`) |
+| `websocketflood` | Real WS handshake + 100×4KB binary frames per tick (direct, no proxy) |
+| `h2streamflood` | Real HTTP/2 handshake, 50 multiplexed POST streams per tick (direct, no proxy) |
+| (78 more in the catalog — see `--list-modes`) |
 
 ### L4 Transport — TCP (28 modes)
 
@@ -170,9 +173,10 @@ sudo ./target/release/simulate_load_rust --protocol raw 192.168.1.1:0 tcp-syn-fl
 ```
 src/
 ├── main.rs          — Entry point, CLI parsing, protocol dispatch
-├── catalog.rs       — 107-entry protocol catalog with metadata
+├── catalog.rs       — 113-entry protocol catalog with metadata
 ├── types.rs         — All type/struct/enum definitions
 ├── http.rs          — 88 HTTP attack functions
+├── proto.rs         — WebSocket + HTTP/2 protocol-fidelity floods (rustls/h2)
 ├── support.rs       — ProxyPool,Stats,Tor control,run_load helpers
 ├── tcp/
 │   └── mod.rs       — 28 TCP protocol implementations
@@ -204,10 +208,12 @@ Global options:
   -h, --help           Show help
   --protocol <p>       Protocol: http, tcp, udp, raw (default: http)
   --gui                Launch interactive TUI catalog browser
-  --list-modes         List all 107 attack modes and exit
+  --list-modes         List all 113 attack modes and exit
   --trigger <port>     Start a UDP trigger amplifier listener
   --auto-tune          PID controller concurrency auto-tuning
   --tui                Interactive console dashboard
+  --crawl              Attack all probed URLs (imgs+apis+statics), not just /
+  --timeseries-csv F   Write per-interval latency percentiles CSV
   --config F           Load config from file
   --insecure           Skip SSL certificate verification
   --custom-header H    Custom header (format: 'Name: Value')

@@ -55,6 +55,8 @@ fn print_help() {
     println!("  --rotation-strategy   Proxy rotation: weighted|round-robin|random (default: weighted)");
     println!("  --log-file F          Append status updates to file");
     println!("  --canary              Run a canary health check before load test");
+    println!("  --crawl               Attack all probed URLs (imgs+apis+statics), not just /");
+    println!("  --timeseries-csv F    Write per-interval latency percentiles CSV (degradation curve)");
     println!("  --stats-interval S    Status update interval in seconds (default: 5)");
     println!("  --tor-circuits N      Number of Tor circuits to use (default: 3)");
     println!("  --ramp-up S           Gradually increase concurrency from 1 to target over S seconds");
@@ -116,6 +118,7 @@ mod types;
 mod catalog;
 mod support;
 mod http;
+mod proto;
 mod tcp;
 mod udp;
 mod raw;
@@ -214,7 +217,9 @@ async fn main() {
     let mut max_retries: usize = 3;
     let mut rotation_strategy = String::from("weighted");  // weighted, round-robin, random
     let mut log_file: Option<String> = None;
+    let mut timeseries_csv: Option<String> = None;
     let mut canary = false;
+    let mut use_crawl = false;
     let mut report_file: Option<String> = None;
     let mut stats_interval_secs: u64 = 5;
     let mut tor_circuits: usize = 3;
@@ -463,12 +468,18 @@ async fn main() {
                     log_file = Some(val);
                 }
             }
+            "--timeseries-csv" => {
+                if let Some(val) = args_iter.next() {
+                    timeseries_csv = Some(val);
+                }
+            }
             "--report" => {
                 if let Some(val) = args_iter.next() {
                     report_file = Some(val);
                 }
             }
             "--canary" => canary = true,
+            "--crawl" => use_crawl = true,
             _ => {
                 let other = arg;
                 // Keep the old format as fallback with '=value' style flags
@@ -613,7 +624,9 @@ async fn main() {
                         "max_redirects" => if let Ok(parsed) = val.parse() { max_redirects = parsed; },
                         "rotation_strategy" => rotation_strategy = val.to_string(),
                         "log_file" => log_file = Some(val.to_string()),
+                        "timeseries_csv" => timeseries_csv = Some(val.to_string()),
                         "canary" => canary = val.parse().unwrap_or(false),
+                        "crawl" => use_crawl = val.parse().unwrap_or(false),
                         "stats_interval" => if let Ok(parsed) = val.parse() { stats_interval_secs = parsed; },
                         "tor_circuits" => if let Ok(parsed) = val.parse() { tor_circuits = parsed; },
                         "ramp_up" | "ramp_up_secs" => if let Ok(parsed) = val.parse() { ramp_up_secs = parsed; },
@@ -888,6 +901,7 @@ async fn main() {
         st.tor_proxy = tor_proxy.clone();
         st.verbose = verbose;
         st.max_retries = max_retries;
+        st.use_crawl = use_crawl;
         st.attack_mode = match attack_str.as_str() {
             "bandwidth" => AttackMode::Bandwidth,
             "slowread" => AttackMode::SlowRead,
@@ -903,6 +917,8 @@ async fn main() {
             "slowloris" => AttackMode::Slowloris,
             "h2rapidreset" | "h2-rapid-reset" | "h2reset" => AttackMode::H2RapidReset,
             "carpetbomb" | "carpet-bomb" | "multivector" => AttackMode::CarpetBomb,
+            "websocketflood" | "websocket" | "wsflood" | "ws-flood" => AttackMode::WebSocketFlood,
+            "h2streamflood" | "h2stream" | "h2-multiplex" | "h2multiplex" => AttackMode::H2StreamFlood,
             _ => AttackMode::Normal,
         };
 
@@ -1348,7 +1364,12 @@ async fn main() {
 
             let mut last_requests = 0u64;
             let mut last_bytes = 0u64;
+            let mut last_errors = 0u64;
             let mut last_time = start;
+            // Time-series: one percentile snapshot per stats interval (only
+            // populated when --timeseries-csv is set, but drained every tick so
+            // the interval_latency buffer can't grow unbounded either way).
+            let mut timeseries: Vec<TimeSeriesPoint> = Vec::new();
 
             while start.elapsed().as_secs() < duration_secs {
                 tokio::time::sleep(Duration::from_secs(stats_interval_secs)).await;
@@ -1371,6 +1392,29 @@ async fn main() {
                 let (p50, p90, p95, p99) = stats.latency_samples.get_percentiles();
                 let active_concurrency = stats.concurrency.load(Ordering::Relaxed);
                 let elapsed = start.elapsed().as_secs();
+
+                // Drain this interval's latency samples into a true per-window
+                // percentile snapshot (the degradation curve). Drained every tick
+                // regardless of --timeseries-csv so the buffer stays bounded.
+                {
+                    let mut batch = Vec::new();
+                    if let Ok(mut g) = stats.interval_latency.lock() {
+                        std::mem::swap(&mut batch, &mut *g);
+                    }
+                    if timeseries_csv.is_some() {
+                        let reqs_this = cur_reqs.saturating_sub(last_requests);
+                        let errs_this = cur_errors.saturating_sub(last_errors);
+                        let bytes_this = cur_bytes.saturating_sub(last_bytes);
+                        let (ip50, ip90, ip95, ip99) = percentiles_from(&mut batch);
+                        timeseries.push(TimeSeriesPoint {
+                            elapsed_secs: elapsed,
+                            req_count: reqs_this,
+                            error_count: errs_this,
+                            bytes: bytes_this,
+                            p50: ip50, p90: ip90, p95: ip95, p99: ip99,
+                        });
+                    }
+                }
 
                 if tui {
                     print!("{}[2J{}[1;1H", 27 as char, 27 as char);
@@ -1491,6 +1535,7 @@ async fn main() {
                 
                 last_requests = cur_reqs;
                 last_bytes = cur_bytes;
+                last_errors = cur_errors;
                 last_time = now;
 
                 if let Some(max_err) = max_errors {
@@ -1633,7 +1678,17 @@ async fn main() {
                         "bypass_recommendations": state_guard.waf_profile.lock().map(|w| w.bypass_recommendations.clone()).unwrap_or_default()
                     },
                     "proxies": prox_list,
-                    "sessions": sessions
+                    "sessions": sessions,
+                    "timeseries": timeseries.iter().map(|p| serde_json::json!({
+                        "elapsed_s": p.elapsed_secs,
+                        "requests": p.req_count,
+                        "errors": p.error_count,
+                        "bytes": p.bytes,
+                        "p50_ms": p.p50,
+                        "p90_ms": p.p90,
+                        "p95_ms": p.p95,
+                        "p99_ms": p.p99
+                    })).collect::<Vec<_>>()
                 });
                 match serde_json::to_string_pretty(&json) {
                     Ok(s) => println!("{}\n", s),
@@ -1750,6 +1805,9 @@ async fn main() {
                     total_bytes: final_bytes,
                     duration: elapsed_secs,
                 });
+            }
+            if let Some(ref path) = timeseries_csv {
+                write_timeseries_csv(path, &timeseries);
             }
         }
     }

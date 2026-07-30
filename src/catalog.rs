@@ -1557,4 +1557,38 @@ pub static METHODS: &[AmplificationMethod] = &[
         is_implemented: true,
         http_mode: Some("carpetbomb"),
     },
+    // ================================================================
+    // NEW: WebSocket Frame Flood — real WS handshake + binary frame flood
+    // Direct connection (no proxy pool); requires wss/https target
+    // ================================================================
+    AmplificationMethod {
+        id: "websocketflood",
+        name: "WebSocket Frame Flood",
+        description: "Completes a genuine WebSocket handshake via tokio-tungstenite, then floods 4KB binary frames over the open socket (100 per request tick). Stresses the server's WS frame parser, per-connection buffers, and upgrade-path state — a vector invisible to HTTP/1.1-only floods. Opens its own direct TLS connection (does not route through the proxy pool); target must be https/wss.",
+        layer: NetworkLayer::Application,
+        transport: TransportType::Tcp,
+        port: 443,
+        ampl_factor: "100 x 4KB frames per tick over 1 upgraded socket",
+        needs_root: false,
+        works_with_tor: false,
+        is_implemented: true,
+        http_mode: Some("websocketflood"),
+    },
+    // ================================================================
+    // NEW: HTTP/2 Stream Multiplex Flood — real h2 handshake, N streams
+    // Direct connection (no proxy pool); requires https target
+    // ================================================================
+    AmplificationMethod {
+        id: "h2streamflood",
+        name: "HTTP/2 Stream Multiplex Flood",
+        description: "Performs a real HTTP/2 handshake (ALPN h2 + connection preface) via the h2 crate and multiplexes 50 concurrent POST streams with 2KB DATA payloads over a single connection. Exercises the server's concurrent-stream state machine, flow-control windows, and per-stream buffers — distinct from both HTTP/1.1 floods and the RST-based h2rapidreset. Opens its own direct TLS connection (does not route through the proxy pool); target must be https.",
+        layer: NetworkLayer::Application,
+        transport: TransportType::Tcp,
+        port: 443,
+        ampl_factor: "50 concurrent streams x 2KB DATA per tick over 1 h2 connection",
+        needs_root: false,
+        works_with_tor: false,
+        is_implemented: true,
+        http_mode: Some("h2streamflood"),
+    },
 ];
