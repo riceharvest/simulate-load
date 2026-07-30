@@ -392,9 +392,12 @@ pub(crate) async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>)
     let mut vercel = false; let mut plan = String::new(); let mut middleware = false;
     let mut imgs: Vec<String> = vec![]; let mut apis: Vec<String> = vec![]; let mut statics: Vec<String> = vec![]; let mut imgopt = false;
     let mut isr = false; let mut cache_bypass = false; let mut edge_config = false; let mut html = String::new();
+    let mut root_ok = false;
 
-    // Fetch headers using curl to bypass JA3/WAF blocks
-    let mut curl_args = vec!["-I", "-s", "-m", "5", "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"];
+    // Fetch headers using curl to bypass JA3/WAF blocks.
+    // Tor cold circuits can exceed 10s on first connect, so give generous timeouts.
+    let curl_tmo = if effective_tor_proxy.is_some() { "20" } else { "5" };
+    let mut curl_args = vec!["-I", "-s", "-m", curl_tmo, "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"];
     let mut curl_proxy_arg = String::new();
     if let Some(ref proxy) = effective_tor_proxy {
         curl_proxy_arg = format!("socks5h://{}", proxy.trim_start_matches("socks5://").trim_start_matches("socks5h://"));
@@ -443,8 +446,9 @@ pub(crate) async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>)
     }
 
     // Fetch HTML body using curl (bypass WAF/JA3)
+    let html_tmo = if effective_tor_proxy.is_some() { "25" } else { "8" };
     let mut curl_html_args = vec![
-        "-s", "-m", "8", "-L",
+        "-s", "-m", html_tmo, "-L",
         "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "-H", "Accept-Language: en-US,en;q=0.9",
@@ -463,6 +467,7 @@ pub(crate) async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>)
         .await;
     if let Ok(out) = html_cmd {
         if out.status.success() {
+            root_ok = true;
             html = String::from_utf8_lossy(&out.stdout).to_string();
         }
     }
@@ -580,14 +585,17 @@ pub(crate) async fn probe_domain(target_url: &str, state: &Arc<Mutex<AppState>>)
     if cache_bypass { status.push_str("CacheBypass ✅ "); }
     if edge_config { status.push_str("EdgeCfg ✅ "); }
     if vercel { status.push_str("LogDrain 🔸 "); }
-    // Only mark unreachable if we couldn't even detect the platform
+    // Only mark unreachable if the root fetch itself failed AND no signals were found
     let platform_known = vercel || !plan.is_empty();
-    if !platform_known && verified_statics.is_empty() && !imgopt && apis.is_empty() && !middleware { 
+    if !root_ok && !platform_known && verified_statics.is_empty() && !imgopt && apis.is_empty() && !middleware { 
         status.push_str("Empty/unreachable"); 
     } else if !verified_statics.is_empty() || !apis.is_empty() || imgopt {
         // Already has detailed info, no extra label needed
     } else if platform_known {
         // Platform confirmed but statics blocked by WAF — still reachable
+        status.push_str("Reachable ✅");
+    } else if root_ok {
+        // Root responded but no platform/feature signals — still reachable
         status.push_str("Reachable ✅");
     }
 
@@ -671,8 +679,26 @@ pub(crate) async fn filter_alive_proxies(proxies: &[String], target_url: &str, c
 }
 
 
-pub(crate) async fn warm_tor_circuits(proxies: &[String], target_url: &str, timeout_secs: u64, gap_secs: u64) {
-    for (i, proxy_url) in proxies.iter().enumerate() {
+pub(crate) async fn warm_tor_circuits(proxies: &[String], target_url: &str, timeout_secs: u64, gap_secs: u64, n_circuits: usize) {
+    // Expand any ":isolate@" SOCKS5 Tor template into its N concrete circuits
+    // (tor0..torN-1) so each isolated circuit is warmed exactly once. Non-isolate
+    // proxies (plain http/socks) are warmed as-is.
+    let mut expanded: Vec<String> = Vec::new();
+    for proxy_url in proxies {
+        if proxy_url.contains(":isolate@") {
+            if let Some(base) = proxy_url.split('@').nth(1) {
+                let base = base.trim_end_matches('/');
+                for i in 0..n_circuits.max(1) {
+                    expanded.push(format!("socks5h://tor{}:isolate@{}", i, base));
+                }
+            } else {
+                expanded.push(proxy_url.clone());
+            }
+        } else {
+            expanded.push(proxy_url.clone());
+        }
+    }
+    for (i, proxy_url) in expanded.iter().enumerate() {
         let warmup_url = format!("{}{}", target_url.trim_end_matches('/'), "/");
         let proxy = match reqwest::Proxy::all(proxy_url) {
             Ok(p) => p,
@@ -694,7 +720,7 @@ pub(crate) async fn warm_tor_circuits(proxies: &[String], target_url: &str, time
         };
         let start = Instant::now();
         eprintln!("  Warming circuit {} via {} to {}...", i, proxy_url, warmup_url);
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), client.head(&warmup_url).send()).await {
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), client.get(&warmup_url).send()).await {
             Ok(Ok(resp)) => {
                 let status = resp.status();
                 let elapsed = start.elapsed().as_millis();
@@ -726,23 +752,17 @@ pub(crate) async fn get_proxies(mode: ProxyMode, state: &Arc<Mutex<AppState>>) -
             let n_unique = config.tor_circuits.max(1);
             if ok {
                 state.lock().await.status_msg = "Tor ready".to_string();
-                let mut proxies = Vec::with_capacity(n_unique);
-                for i in 0..n_unique {
-                    proxies.push(format!("socks5h://tor{}:isolate@127.0.0.1:9050", i));
-                }
+                let proxies = vec!["socks5h://tor:isolate@127.0.0.1:9050".to_string()];
                 // Warm up circuits with HEAD to actual target
                 state.lock().await.status_msg = format!("Warming {} Tor circuits...", n_unique);
-                warm_tor_circuits(&proxies, &target_url, 20, 2).await;
+                warm_tor_circuits(&proxies, &target_url, 20, 2, n_unique).await;
                 Some(proxies)
             } else if let Ok(custom) = std::env::var("TOR_PROXY") {
                 let base = custom.trim_end_matches('?').trim_end_matches('/');
                 let base = if let Some(pos) = base.find('@') { &base[pos+1..] } else { base };
                 state.lock().await.status_msg = format!("Using TOR_PROXY: {}", base);
-                let mut proxies = Vec::with_capacity(n_unique);
-                for i in 0..n_unique {
-                    proxies.push(format!("socks5h://tor{}:isolate@{}", i, base));
-                }
-                warm_tor_circuits(&proxies, &target_url, 20, 2).await;
+                let proxies = vec![format!("socks5h://tor:isolate@{}", base)];
+                warm_tor_circuits(&proxies, &target_url, 20, 2, n_unique).await;
                 Some(proxies)
             } else {
                 state.lock().await.status_msg = "Tor unavailable".to_string();

@@ -1292,3 +1292,151 @@ fn build_tp240_phonehome() -> Vec<u8> {
     
     pkt
 }
+
+// ================================================================
+// UDP PROBE — single-shot effectiveness test
+// Sends exactly ONE query per amplification vector and measures the
+// real response. No flood. Machine-readable lines: PROBE|id|sent|recv|amp|verdict
+// ================================================================
+fn build_request_for(mode: UdpMode) -> Option<Vec<u8>> {
+    Some(match mode {
+        UdpMode::DnsAny => build_dns_any(),
+        UdpMode::DnsIxfr => build_dns_ixfr(),
+        UdpMode::NtpMonlist => build_ntp_monlist(),
+        UdpMode::NtpQuery => build_ntp_query(),
+        UdpMode::MemcachedStats => build_memcached_stats(),
+        UdpMode::MemcachedGet => build_memcached_get(),
+        UdpMode::SsdpDiscovery => build_ssdp_discovery(),
+        UdpMode::SnmpGetBulk => build_snmp_getbulk(),
+        UdpMode::CharGen => build_chargen(),
+        UdpMode::Qotd => build_qotd(),
+        UdpMode::CldapSearch => build_cldap_search(),
+        UdpMode::CoapAmplification => build_coap_request(),
+        UdpMode::WsDiscovery => build_ws_discovery(),
+        UdpMode::PortmapDump => build_portmap_dump(),
+        UdpMode::NetbiosNs => build_netbios_ns(),
+        UdpMode::MdnsQuery => build_mdns_query(),
+        UdpMode::TftpRead => build_tftp_read(),
+        UdpMode::SipOptions => build_sip_options(),
+        UdpMode::IkeAmplification => build_ike_sa_init(),
+        UdpMode::RipQuery => build_rip_query(),
+        UdpMode::BacnetDiscovery => build_bacnet_whois(),
+        UdpMode::NtpReadVar => build_ntp_readvar(),
+        UdpMode::DnsDnssec => build_dns_dnssec(),
+        UdpMode::DnsRecursiveChain => build_dns_recursive(),
+        UdpMode::SlpDuUpdate => build_slp_du_update(),
+        UdpMode::DnsNxns => build_dns_nxns(),
+        UdpMode::Tp240PhoneHome => build_tp240_phonehome(),
+        UdpMode::UdpFlood | UdpMode::GenericUdp => return None,
+    })
+}
+
+async fn probe_one(mode: UdpMode, host: &str, port: u16, timeout_ms: u64) -> Result<(usize, usize), String> {
+    let request = build_request_for(mode).ok_or_else(|| "no probe payload".to_string())?;
+    let socket = UdpSocket::bind("0.0.0.0:0").await.map_err(|e| format!("bind: {}", e))?;
+    let target_addr = format!("{}:{}", host, port);
+
+    let sent = request.len();
+    socket.send_to(&request, &target_addr).await.map_err(|e| format!("send: {}", e))?;
+
+    // Drain all response packets until the deadline — amplification
+    // responses (monlist, ANY, stats) often arrive as many datagrams.
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut buf = vec![0u8; 65535];
+    let mut recv_total = 0usize;
+    loop {
+        let now = Instant::now();
+        if now >= deadline { break; }
+        match tokio::time::timeout(deadline - now, socket.recv_from(&mut buf)).await {
+            Ok(Ok((n, _))) => recv_total += n,
+            Ok(Err(e)) => {
+                if recv_total == 0 { return Err(format!("recv: {}", e)); }
+                break;
+            }
+            Err(_) => break, // timeout
+        }
+    }
+    Ok((sent, recv_total))
+}
+
+/// Probe every amplification vector against a host with a single packet each.
+/// `target`: "host" or "host:port" (explicit port overrides per-mode defaults).
+pub async fn run_udp_probe(target: &str, timeout_ms: u64) {
+    let host = target.split(':').next().unwrap_or(target);
+    let custom_port = target.split(':').nth(1).and_then(|p| p.parse::<u16>().ok());
+
+    const PROBE_MODES: &[(&str, UdpMode)] = &[
+        ("dns-any", UdpMode::DnsAny),
+        ("dns-ixfr", UdpMode::DnsIxfr),
+        ("dnssec", UdpMode::DnsDnssec),
+        ("dns-recursive", UdpMode::DnsRecursiveChain),
+        ("dns-nxns", UdpMode::DnsNxns),
+        ("ntp-monlist", UdpMode::NtpMonlist),
+        ("ntp-query", UdpMode::NtpQuery),
+        ("ntp-readvar", UdpMode::NtpReadVar),
+        ("memcached", UdpMode::MemcachedStats),
+        ("memcached-get", UdpMode::MemcachedGet),
+        ("ssdp", UdpMode::SsdpDiscovery),
+        ("snmp-getbulk", UdpMode::SnmpGetBulk),
+        ("chargen", UdpMode::CharGen),
+        ("qotd", UdpMode::Qotd),
+        ("cldap", UdpMode::CldapSearch),
+        ("coap", UdpMode::CoapAmplification),
+        ("ws-discovery", UdpMode::WsDiscovery),
+        ("portmap", UdpMode::PortmapDump),
+        ("netbios", UdpMode::NetbiosNs),
+        ("mdns", UdpMode::MdnsQuery),
+        ("tftp", UdpMode::TftpRead),
+        ("sip", UdpMode::SipOptions),
+        ("ike", UdpMode::IkeAmplification),
+        ("rip", UdpMode::RipQuery),
+        ("bacnet", UdpMode::BacnetDiscovery),
+        ("slp", UdpMode::SlpDuUpdate),
+        ("tp240", UdpMode::Tp240PhoneHome),
+    ];
+
+    println!("=== UDP PROBE: {} ===", target);
+    println!("Single query per vector, {}ms window. No flood. Measures real amplification.", timeout_ms);
+    if custom_port.is_some() {
+        println!("Explicit port override: {} (used for ALL vectors)", custom_port.unwrap());
+    }
+    println!();
+    println!("{:<15} {:>6} {:>8} {:>9}  {}", "MODE", "SENT", "RECV", "AMP", "STATUS");
+    println!("{}", "-".repeat(62));
+
+    let mut effective: Vec<(String, f64)> = Vec::new();
+    for (id, mode) in PROBE_MODES {
+        let port = custom_port.unwrap_or_else(|| mode.default_port());
+        match probe_one(*mode, host, port, timeout_ms).await {
+            Ok((sent, recv)) => {
+                let amp = if sent > 0 { recv as f64 / sent as f64 } else { 0.0 };
+                let verdict = if recv == 0 {
+                    "no response"
+                } else if amp >= 2.0 {
+                    "EFFECTIVE"
+                } else {
+                    "weak"
+                };
+                println!("{:<15} {:>6} {:>8} {:>8.1}x  {}", id, sent, recv, amp, verdict);
+                println!("PROBE|{}|{}|{}|{:.2}|{}", id, sent, recv, amp, verdict);
+                if recv > 0 { effective.push((id.to_string(), amp)); }
+            }
+            Err(e) => {
+                println!("{:<15} {:>6} {:>8} {:>9}  {}", id, "-", "0", "-", e);
+                println!("PROBE|{}|0|0|0|{}", id, e);
+            }
+        }
+    }
+
+    println!("{}", "-".repeat(62));
+    effective.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    if effective.is_empty() {
+        println!("No vector produced a response. Host is filtered, offline, or services are hardened.");
+    } else {
+        println!("Effective vectors (ranked):");
+        for (id, amp) in &effective {
+            println!("  {:<15} {:.1}x", id, amp);
+        }
+    }
+    println!("PROBE_DONE|{}", effective.len());
+}

