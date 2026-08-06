@@ -12,14 +12,19 @@ struct ProbeCheck {
 
 /// Run WAF probes against a target URL.
 /// Returns a WafProfile with detected WAF type and confidence.
-pub(crate) async fn detect_waf(target_url: &str, config: &ClientConfig) -> WafProfile {
+pub(crate) async fn detect_waf(target_url: &str, config: &ClientConfig, proxy: Option<&str>) -> WafProfile {
     let mut checks: Vec<ProbeCheck> = Vec::new();
     let base = target_url.trim_end_matches('/');
 
     // Build a client with relaxed settings for probing
-    let builder = browser_client_builder(config)
+    let mut builder = browser_client_builder(config)
         .redirect(reqwest::redirect::Policy::limited(5))
         .timeout(Duration::from_secs(8));
+    if let Some(p) = proxy {
+        if let Ok(proxy_val) = reqwest::Proxy::all(p) {
+            builder = builder.proxy(proxy_val);
+        }
+    }
     let Ok(client) = builder.build() else {
         return WafProfile {
             waf_type: WafType::Unknown,

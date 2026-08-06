@@ -25,6 +25,7 @@ futures = "0.3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "0.26"
+tokio-socks = "0.5"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
