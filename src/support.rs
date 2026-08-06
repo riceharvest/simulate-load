@@ -133,30 +133,36 @@ impl ProxyPool {
             }
         };
 
-        // Tor circuit rotation: prefer different circuits each call
+        // Tor circuit rotation: prefer different circuits each call.
         if self.labels[idx].contains("tor") {
-            // Apply circuit stickiness for Tor circuits
+            // Apply circuit stickiness for Tor circuits.
             if self.circuit_stickiness > 0 {
-                // Prefer circuits that have been recently used (stickiness)
                 let now = Instant::now();
-                let recent_circuits: Vec<usize> = self.active_indices.iter()
-                    .filter(|&&i| self.labels[i].contains("tor"))
-                    .filter(|&&i| self.circuit_cooldown[i] <= now)
-                    .cloned().collect();
-                if !recent_circuits.is_empty() {
-                    let counter = self.circuit_rotation_counter.fetch_add(1, Ordering::Relaxed);
-                    let new_idx = recent_circuits[counter % recent_circuits.len()];
-                    return Some((new_idx, self.clients[new_idx].clone()));
+                let tor_circuits: Vec<usize> = self.active_indices.iter()
+                    .copied()
+                    .filter(|&i| self.labels[i].contains("tor"))
+                    .filter(|&i| self.circuit_cooldown[i] <= now)
+                    .collect();
+                if !tor_circuits.is_empty() {
+                    // Health-aware load balancing: once success/failure feedback has
+                    // skewed the weights (degraded circuit = low weight), distribute
+                    // load proportionally so a slow circuit never carries as much
+                    // traffic as a healthy one — avoids SOCKS5 overload and wasted
+                    // throughput on a dying circuit. A fresh pool (all weights equal)
+                    // rotates round-robin as before.
+                    let weights: Vec<f64> = tor_circuits.iter().map(|&i| self.weights[i]).collect();
+                    if weights.iter().all(|&w| w == weights[0]) {
+                        let counter = self.circuit_rotation_counter.fetch_add(1, Ordering::Relaxed);
+                        let new_idx = tor_circuits[counter % tor_circuits.len()];
+                        return Some((new_idx, self.clients[new_idx].clone()));
+                    }
+                    if let Ok(dist) = WeightedIndex::new(&weights) {
+                        let new_idx = tor_circuits[dist.sample(&mut rng)];
+                        return Some((new_idx, self.clients[new_idx].clone()));
+                    }
                 }
-                // Fallback: prefer different circuits each call
-                let tor_indices: Vec<usize> = self.active_indices.iter()
-                    .filter(|&&i| self.labels[i].contains("tor"))
-                    .cloned().collect();
-                if !tor_indices.is_empty() {
-                    let new_idx = tor_indices[rng.random_range(0..tor_indices.len())];
-                    return Some((new_idx, self.clients[new_idx].clone()));
-                }
-                // Fallback: the chosen active index is non-Tor, use it directly
+                // Fallback: the strategy-selected index (non-Tor slot, or no Tor
+                // circuit is currently usable).
                 return Some((idx, self.clients[idx].clone()));
             }
         }

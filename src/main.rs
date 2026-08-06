@@ -1992,6 +1992,35 @@ mod tests {
         assert!(pool.circuit_cooldown[0] > Instant::now(), "report_failure must set a future cooldown");
     }
 
+    #[test]
+    fn next_balances_tor_load_away_from_degraded_circuit() {
+        // Regression for the Tor-branch bypass: the circuit picker used to ignore the
+        // success/failure weights entirely (pure counter % len rotation), so a degraded
+        // circuit carried exactly as much traffic as a healthy one — the SOCKS5
+        // overload / wasted-throughput failure mode. After skewing one circuit's
+        // weight down, next() must select the healthy circuits far more often.
+        let proxies = vec!["socks5h://tor:isolate@127.0.0.1:9050".to_string()];
+        let config = ClientConfig { tor_circuits: 3, ..default_test_config() };
+        let mut pool = ProxyPool::new(&proxies, &config, "weighted");
+        // Degrade circuit 1 hard: enough failures to bottom out its weight and put it
+        // in a brief cooldown window.
+        for _ in 0..4 {
+            pool.report_failure(1);
+        }
+        assert!(pool.weights[1] < pool.weights[0], "degraded circuit must have lower weight");
+        // Wait out the cooldown so it is selectable again, then sample.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut picks = [0usize; 3];
+        for _ in 0..2000 {
+            let (idx, _) = pool.next().expect("pool non-empty");
+            picks[idx] += 1;
+        }
+        // Degraded circuit gets a minority share (< 10% of picks); healthy ones split the rest.
+        let degraded_share = picks[1] as f64 / 2000.0;
+        assert!(degraded_share < 0.10, "degraded circuit selected too often: {picks:?}");
+        assert!(picks[0] > 0 && picks[2] > 0, "healthy circuits must still be used: {picks:?}");
+    }
+
     fn rate_limit_delay_ms(rate: Option<u64>) -> u64 {
         match rate {
             Some(rate) if rate > 0 => 1000u64.saturating_div(rate),
