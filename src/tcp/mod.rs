@@ -738,9 +738,14 @@ pub async fn run_tcp_load(
     proxy: Option<String>,
     concurrency: usize,
     duration_secs: u64,
+    rate_limit: Option<u64>,
 ) {
     let start = Instant::now();
     let dur = Duration::from_secs(duration_secs);
+    let mut rate_limiter = crate::types::RateLimiter::new(rate_limit);
+    if let Some(rate) = rate_limit {
+        println!("Rate limit: {} pkt/s", rate);
+    }
     let port = mode.default_port();
     let host = target.split(':').next().unwrap_or(target);
     let custom_port = target.split(':').nth(1).and_then(|p| p.parse::<u16>().ok());
@@ -760,6 +765,7 @@ pub async fn run_tcp_load(
     let mut total_errors: u64 = 0;
 
     while start.elapsed() < dur {
+        rate_limiter.pace().await;
         let mut handles = Vec::new();
         let batch_start = Instant::now();
 

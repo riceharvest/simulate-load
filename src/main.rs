@@ -643,7 +643,7 @@ async fn main() {
         let tcp_mode = tcp::TcpMode::from_str(&tcp_mode_str)
             .unwrap_or(tcp::TcpMode::GenericConnect);
 
-        tcp::run_tcp_load(tcp_mode, &target, tor_proxy.clone(), tcp_concurrency, tcp_duration).await;
+        tcp::run_tcp_load(tcp_mode, &target, tor_proxy.clone(), tcp_concurrency, tcp_duration, rate_limit).await;
         return;
     }
 
@@ -696,7 +696,7 @@ async fn main() {
                 return;
             }
         };
-        udp::run_udp_load(udp_mode, &udp_host, udp_concurrency, udp_duration).await;
+        udp::run_udp_load(udp_mode, &udp_host, udp_concurrency, udp_duration, rate_limit).await;
         return;
     }
 
