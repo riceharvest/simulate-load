@@ -368,7 +368,7 @@ impl RateLimiter {
             tokio::time::sleep(sleep_time).await;
         }
         // Advance the window by exactly one interval.
-        self.next_allowed = self.next_allowed + self.interval;
+        self.next_allowed += self.interval;
     }
 }
 
@@ -585,7 +585,7 @@ pub(crate) fn discover_multi_tor() -> Vec<TorInstance> {
             continue;
         }
         // Parse socks5h://127.0.0.1:19050
-        let port: u16 = match line.split(':').last().and_then(|s| s.parse().ok()) {
+        let port: u16 = match line.split(':').next_back().and_then(|s| s.parse().ok()) {
             Some(p) => p,
             None => continue,
         };
@@ -601,7 +601,7 @@ pub(crate) fn discover_multi_tor() -> Vec<TorInstance> {
                 content
                     .lines()
                     .find(|l| l.trim().starts_with("ExitNodes"))
-                    .and_then(|l| l.trim().split_whitespace().nth(1))
+                    .and_then(|l| l.split_whitespace().nth(1))
                     .map(|s| s.trim_matches(|c| c == '{' || c == '}').to_string())
             })
             .unwrap_or_else(|| "?".to_string());

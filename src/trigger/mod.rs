@@ -8,7 +8,6 @@
 /// authentication and sends a large response to any source IP that
 /// sends a small query. This module provides a controlled local
 /// amplifier for testing purposes.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -38,7 +37,7 @@ pub struct TriggerConfig {
 impl Default for TriggerConfig {
     fn default() -> Self {
         Self {
-            bind: "127.0.0.1:19999".parse().unwrap(),
+            bind: "127.0.0.1:19999".parse().unwrap_or_else(|_| unreachable!("static addr parse")),
             amplify: AmplifyMode::EchoPad(256),
         }
     }

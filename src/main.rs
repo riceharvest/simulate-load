@@ -393,7 +393,7 @@ async fn main() {
                 if let Some(val) = args_iter.next() {
                     let port: u16 = val.parse().unwrap_or(19999);
                     let config = trigger::TriggerConfig {
-                        bind: format!("0.0.0.0:{}", port).parse().unwrap(),
+                        bind: format!("0.0.0.0:{}", port).parse().unwrap_or_else(|_| unreachable!("valid socket addr")),
                         ..Default::default()
                     };
                     println!("Starting trigger amplifier on UDP port {}...", port);
@@ -1778,7 +1778,7 @@ async fn main() {
 
             // Per-circuit stats table (Tor mode): reqs + errors + error rate per circuit.
             {
-                let guard = pool.lock().unwrap();
+                let guard = pool.lock().unwrap_or_else(|e| e.into_inner());
                 let m = guard.circuit_requests.lock().unwrap_or_else(|e| e.into_inner());
                 if !m.is_empty() {
                     println!("\n  Per-circuit stats:");

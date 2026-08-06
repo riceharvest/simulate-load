@@ -255,10 +255,10 @@ fn check_cloudflare(headers: &[(String, String)], body: &str) -> f64 {
         score += 0.3;
     }
     // Chrome/Edge challenge page
-    if body.contains("checking your browser") || body.contains("attention required") || body.contains("cloudflare") {
-        if body.contains("just a moment") || body.contains("5 seconds") {
-            score += 0.4;
-        }
+    if (body.contains("checking your browser") || body.contains("attention required") || body.contains("cloudflare"))
+        && (body.contains("just a moment") || body.contains("5 seconds"))
+    {
+        score += 0.4;
     }
     score.min(1.0)
 }

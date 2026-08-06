@@ -457,7 +457,7 @@ fn build_ssh_kexinit() -> Vec<u8> {
     packet.extend_from_slice(&(total_len as u32).to_be_bytes());
     packet.push(padding as u8);
     packet.extend_from_slice(&payload);
-    packet.extend(std::iter::repeat(0u8).take(padding));
+    packet.extend(vec![0u8; padding]);
     packet
 }
 
@@ -754,8 +754,8 @@ pub async fn run_tcp_load(
 
     println!("=== TCP Amplification: {} ===", mode.name());
     println!("Target: {}:{} | Concurrency: {} | Duration: {}s", host, port, concurrency, duration_secs);
-    if proxy.is_some() {
-        println!("Proxy: {}", proxy.as_ref().unwrap());
+    if let Some(p) = &proxy {
+        println!("Proxy: {}", p);
     }
     println!();
 
@@ -772,7 +772,6 @@ pub async fn run_tcp_load(
         for _ in 0..concurrency {
             let host = host.to_string();
             let proxy = proxy.clone();
-            let mode = mode;
 
             handles.push(tokio::spawn(async move {
                 match run_protocol(mode, &host, port, proxy.as_deref()).await {
@@ -805,7 +804,7 @@ pub async fn run_tcp_load(
         let _batch_elapsed = batch_start.elapsed().as_secs_f64();
 
         // Status update
-        if elapsed % 5 == 0 || total_requests < 10 {
+        if elapsed.is_multiple_of(5) || total_requests < 10 {
             let amp_ratio = if total_sent > 0 {
                 total_recv as f64 / total_sent as f64
             } else {

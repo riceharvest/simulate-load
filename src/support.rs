@@ -904,12 +904,10 @@ pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::M
         }
         
         // Enforce max_requests limit
-        if safety.0 > 0 {
-            if stats.total_requests.load(Ordering::Relaxed) >= safety.0 {
-                println!("  Max requests ({}) reached, stopping.", safety.0);
-                stats.abort.store(true, Ordering::Relaxed);
-                return;
-            }
+        if safety.0 > 0 && stats.total_requests.load(Ordering::Relaxed) >= safety.0 {
+            println!("  Max requests ({}) reached, stopping.", safety.0);
+            stats.abort.store(true, Ordering::Relaxed);
+            return;
         }
         
         // Enforce error_rate_threshold
@@ -1436,8 +1434,6 @@ pub(crate) fn write_results_csv(path: &str, params: ResultsCsvParams<'_>) {
 /// Unix socket paths are returned as `(path, "unix")`. TCP addresses are parsed
 /// into `(host, port)`; if the port is omitted, the default Tor control port
 /// `9051` is used. A bare numeric value is treated as a port on `127.0.0.1`.
-
-
 pub(crate) fn resolve_control_addr(addr: &str) -> Result<(String, String), String> {
     if addr.is_empty() {
         return Err("control address is empty".to_string());
@@ -1480,8 +1476,6 @@ pub(crate) fn resolve_control_addr(addr: &str) -> Result<(String, String), Strin
 }
 
 /// Read the Tor control cookie file for cookie authentication.
-
-
 pub(crate) fn read_control_cookie(_socket_path: &str) -> Option<String> {
     // Try common cookie locations
     let cookie_paths = [
@@ -1516,8 +1510,6 @@ pub(crate) fn read_control_cookie(_socket_path: &str) -> Option<String> {
 
 /// Send a command over a Tor control connection with optional cookie auth.
 /// Supports both TCP and Unix socket connections.
-
-
 pub(crate) async fn tor_control_command(
     control_addr: &str,
     command: &str,
@@ -1749,9 +1741,6 @@ pub(crate) fn format_time_now() -> String {
 }
 
 /// Gradually increases concurrency from 1 to `target` over `ramp_up_secs` seconds.
-/// Each tick sleeps for `(ramp_up_secs / target)` seconds, then increments concurrency.
-
-
 pub(crate) async fn ramp_up_concurrency(state: Arc<Mutex<AppState>>, target: usize, ramp_up_secs: u64) {
     if ramp_up_secs == 0 || target <= 1 { return; }
     let tick_ms = (ramp_up_secs as f64 / target as f64 * 1000.0).max(200.0) as u64;

