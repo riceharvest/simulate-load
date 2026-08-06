@@ -648,6 +648,10 @@ async fn main() {
 
     // TCP protocol dispatch — bypasses all HTTP infrastructure
     if protocol == "tcp" {
+        if tor_only && tor_proxy.is_none() {
+            eprintln!("  [tor-only] TCP load requires a Tor SOCKS5 proxy (use --tor-proxy). Refusing to run direct.");
+            std::process::exit(1);
+        }
         let target = positional.first().cloned().unwrap_or_else(|| "127.0.0.1".to_string());
         let tcp_mode_str = positional.get(1).cloned().unwrap_or_else(|| "generic".to_string());
         let tcp_concurrency: usize = positional.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
@@ -662,6 +666,10 @@ async fn main() {
 
     // ── Protocol: UDP amplification (no proxy, requires direct socket) ──
     if protocol == "udp" {
+        if tor_only {
+            eprintln!("  [tor-only] UDP amplification cannot be routed through Tor (Tor does not carry UDP). Refusing to run direct.");
+            std::process::exit(1);
+        }
         let udp_host = positional.first().cloned().unwrap_or_else(|| "127.0.0.1:53".to_string());
         let udp_mode_str = positional.get(1).cloned().unwrap_or_else(|| "dns-any".to_string());
         let udp_concurrency: usize = positional.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
@@ -715,6 +723,10 @@ async fn main() {
 
     // ── Protocol: Raw socket operations (requires root/CAP_NET_RAW) ──
     if protocol == "raw" {
+        if tor_only {
+            eprintln!("  [tor-only] Raw socket spoofing cannot be routed through Tor. Refusing to run direct.");
+            std::process::exit(1);
+        }
         let raw_target = positional.first().cloned().unwrap_or_else(|| "127.0.0.1:80".to_string());
         let raw_mode_str = positional.get(1).cloned().unwrap_or_else(|| "tcp-syn-flood".to_string());
         let raw_concurrency: usize = positional.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
