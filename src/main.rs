@@ -1758,6 +1758,10 @@ async fn main() {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use regex::Regex;
+    use reqwest::header::{HeaderMap, SET_COOKIE};
+    use reqwest::Client;
+    use scraper::Selector;
 
     #[test]
     fn send_with_retry_final_fallback_error_message() {
