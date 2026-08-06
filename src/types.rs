@@ -321,6 +321,52 @@ pub(crate) struct ProxyPool {
 // Helper alias for the HashMap used inside ProxyPool.
 pub(crate) type HashMapWrapper = std::collections::HashMap<usize, (u64, u64)>;
 
+// ── Global token-bucket rate limiter ──────────────────────────────────────────
+
+/// A time-based token-bucket rate limiter that enforces a maximum request rate
+/// across ALL concurrent workers.  Instantiated once in run_load() and shared
+/// (via tokio::sync::Mutex) so the total request rate never exceeds `rate` req/s
+/// regardless of concurrency level.
+pub(crate) struct RateLimiter {
+    next_allowed: tokio::time::Instant,
+    interval: std::time::Duration,
+}
+
+impl RateLimiter {
+    /// Create a rate limiter from an optional rate (requests per second).
+    /// `None` or `0` → instant-pass (no throttling).
+    pub(crate) fn new(rate: Option<u64>) -> Self {
+        match rate {
+            Some(r) if r > 0 => {
+                let interval = std::time::Duration::from_secs_f64(1.0 / r as f64);
+                RateLimiter {
+                    next_allowed: tokio::time::Instant::now(),
+                    interval,
+                }
+            }
+            _ => RateLimiter {
+                next_allowed: tokio::time::Instant::now(),
+                interval: std::time::Duration::ZERO,
+            },
+        }
+    }
+
+    /// Await before allowing the next request.  Sleeps the appropriate gap so
+    /// that the *global* average request rate stays at the configured value.
+    pub(crate) async fn pace(&mut self) {
+        if self.interval.is_zero() {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        if self.next_allowed > now {
+            let sleep_time = self.next_allowed - now;
+            tokio::time::sleep(sleep_time).await;
+        }
+        // Advance the window by exactly one interval.
+        self.next_allowed = self.next_allowed + self.interval;
+    }
+}
+
 // ── Latency sampling ──────────────────────────────────────────────────────────
 
 pub(crate) struct LatencySamples {

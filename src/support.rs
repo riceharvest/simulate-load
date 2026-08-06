@@ -866,6 +866,9 @@ pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::M
     
     let mut semaphore = Arc::new(Semaphore::new(effective_conc));
 
+    // Global token-bucket rate limiter (shared across all workers).
+    let mut rate_limiter = RateLimiter::new(rate_limit);
+
     loop {
         if let Some(max_err) = max_errors {
             if stats.errors.load(Ordering::Relaxed) >= max_err {
@@ -934,13 +937,9 @@ pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::M
             
             let _permit = match semaphore.clone().acquire_owned().await { Ok(p) => p, Err(_) => return, };
             
-            // Rate limiting: if rate_limit is Some(n), enforce max requests per second
-            if let Some(rate) = rate_limit {
-                if rate > 0 {
-                    let interval_ms = 1000u64.saturating_div(rate);
-                    tokio::time::sleep(Duration::from_millis(interval_ms)).await;
-                }
-            }
+            // Global token-bucket rate limiter: shared across all workers so
+            // total request rate never exceeds `rate` req/s regardless of concurrency.
+            rate_limiter.pace().await;
             
             let next_client = match pool.lock() {
                 Ok(mut guard) => guard.next(),
