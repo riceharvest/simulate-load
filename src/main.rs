@@ -646,6 +646,21 @@ async fn main() {
         }
     }
 
+    // ── Onion target enforcement ──
+    // An .onion address can only be reached through Tor (SOCKS5 remote DNS).
+    // Refuse to run a mode that would resolve the name on the local resolver,
+    // which would both fail and leak the query + real IP to the target.
+    if target_url.contains(".onion") {
+        let tor_capable = tor_only
+            || mode_str == "tor"
+            || mode_str == "scrape-tor"
+            || tor_proxy.is_some();
+        if !tor_capable {
+            eprintln!("  [error] .onion targets require a Tor proxy (use --tor-only, mode tor/scrape-tor, or --tor-proxy). Refusing to run direct.");
+            std::process::exit(1);
+        }
+    }
+
     // TCP protocol dispatch — bypasses all HTTP infrastructure
     if protocol == "tcp" {
         if tor_only && tor_proxy.is_none() {
