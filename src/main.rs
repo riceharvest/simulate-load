@@ -30,6 +30,7 @@ fn print_help() {
     println!("  --dry-run             Only probe the domain, exit without load test");
     println!("  --verify              Verify proxies, show alive count, exit without load test");
     println!("  --output CSV          Write results to CSV file");
+    println!("  --webhook URL         POST final results JSON to URL when the HTTP test completes");
     println!("  --proxy-file F        Load proxy list from file (one per line or comma-separated)");
     println!("  --tor-proxy URL       Specify custom Tor proxy URL (e.g. socks5h://127.0.0.1:9050)");
     println!("  --tor-control ADDR    Specify custom Tor control port address (e.g. 127.0.0.1:9051)");
@@ -221,6 +222,7 @@ async fn main() {
     let mut canary = false;
     let mut use_crawl = false;
     let mut report_file: Option<String> = None;
+    let mut webhook: Option<String> = None;
     let mut stats_interval_secs: u64 = 5;
     let mut tor_circuits: usize = 3;
     let mut ramp_up_secs: u64 = 0;
@@ -478,6 +480,11 @@ async fn main() {
                     report_file = Some(val);
                 }
             }
+            "--webhook" => {
+                if let Some(val) = args_iter.next() {
+                    webhook = Some(val);
+                }
+            }
             "--canary" => canary = true,
             "--crawl" => use_crawl = true,
             _ => {
@@ -485,6 +492,8 @@ async fn main() {
                 // Keep the old format as fallback with '=value' style flags
                 if other.starts_with("--report=") {
                     report_file = Some(other.strip_prefix("--report=").unwrap_or("").to_string());
+                } else if other.starts_with("--webhook=") {
+                    webhook = Some(other.strip_prefix("--webhook=").unwrap_or("").to_string());
                 } else if other.starts_with("--sni=") {
                     sni = Some(other.strip_prefix("--sni=").unwrap_or("").to_string());
                 } else if other.starts_with("--jitter=") {
@@ -1733,6 +1742,27 @@ async fn main() {
                     Ok(s) => println!("{}\n", s),
                     Err(e) => eprintln!("Failed to serialize JSON: {}", e),
                 }
+                // Webhook notification (HTTP path only) — awaited so it
+                // completes before process exit; bounded by a 10s timeout.
+                if let Some(ref webhook_url) = webhook {
+                    if let Ok(body) = serde_json::to_string(&json) {
+                        let client = reqwest::Client::new();
+                        match tokio::time::timeout(
+                            Duration::from_secs(10),
+                            client
+                                .post(webhook_url)
+                                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                                .body(body)
+                                .send(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => eprintln!("[webhook] POST failed: {}", e),
+                            Err(_) => eprintln!("[webhook] POST timed out after 10s"),
+                        }
+                    }
+                }
             } else {
                 // Persist sessions for next run (non-JSON mode)
                 let state_guard = state.lock().await;
@@ -2813,5 +2843,36 @@ mod tests {
             })
             .collect();
         assert!(unimplemented.is_empty(), "Raw/Icmp catalog ids not parseable as RawMode: {:?}", unimplemented);
+    }
+
+    // ── ByteRatePacer (--throughput-cap enforcement) ─────────────────────────
+
+    #[tokio::test]
+    async fn throughput_cap_pacer_unlimited_never_sleeps() {
+        // cap == 0 → unlimited: must return instantly even with huge byte count.
+        let pacer = crate::types::ByteRatePacer::new(0);
+        let start = tokio::time::Instant::now();
+        pacer.pace(u64::MAX).await;
+        assert!(start.elapsed() < Duration::from_millis(50), "unlimited pacer must not sleep");
+    }
+
+    #[tokio::test]
+    async fn throughput_cap_pacer_within_budget_returns_quickly() {
+        // 8 MB/s cap with only 100 bytes accumulated: any deficit is microseconds.
+        let pacer = crate::types::ByteRatePacer::new(8 * 1024 * 1024);
+        let start = tokio::time::Instant::now();
+        pacer.pace(100).await;
+        assert!(start.elapsed() < Duration::from_millis(50), "within-budget pace must not stall");
+    }
+
+    #[tokio::test]
+    async fn throughput_cap_pacer_over_budget_sleeps_deficit() {
+        // 4000 B/s cap with 1000 bytes already transmitted at t≈0 → ~250ms deficit.
+        let pacer = crate::types::ByteRatePacer::new(4000);
+        let start = tokio::time::Instant::now();
+        pacer.pace(1000).await;
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(180), "expected ~250ms deficit sleep, got {:?}", elapsed);
+        assert!(elapsed < Duration::from_secs(2), "pace should converge near the deficit, got {:?}", elapsed);
     }
 }
