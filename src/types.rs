@@ -372,6 +372,48 @@ impl RateLimiter {
     }
 }
 
+// ── Global byte-rate pacer (throughput cap) ───────────────────────────────────
+
+/// A bandwidth pacer that bounds the *global* application-layer throughput
+/// across ALL concurrent workers.  Instantiated once in run_load() and called
+/// from the dispatch loop: it compares total bytes transmitted so far against
+/// `cap_bytes_per_sec × elapsed` and sleeps the deficit (in bounded chunks)
+/// so aggregate bandwidth converges to the cap regardless of concurrency.
+pub(crate) struct ByteRatePacer {
+    cap_bytes_per_sec: u64,
+    start: tokio::time::Instant,
+}
+
+impl ByteRatePacer {
+    /// Create a pacer from a byte-rate cap.  `0` → instant-pass (unlimited).
+    pub(crate) fn new(cap_bytes_per_sec: u64) -> Self {
+        ByteRatePacer {
+            cap_bytes_per_sec,
+            start: tokio::time::Instant::now(),
+        }
+    }
+
+    /// Sleep until `accumulated_bytes` fits within the budget for the elapsed
+    /// wall-clock time.  Each sleep is capped at 250ms so the dispatch loop
+    /// stays responsive to aborts and re-checks the byte counter afterwards
+    /// (in-flight responses keep adding bytes while we sleep).
+    pub(crate) async fn pace(&self, accumulated_bytes: u64) {
+        if self.cap_bytes_per_sec == 0 {
+            return;
+        }
+        loop {
+            let elapsed = self.start.elapsed().as_secs_f64();
+            let budget = elapsed * self.cap_bytes_per_sec as f64;
+            if accumulated_bytes as f64 <= budget {
+                return;
+            }
+            let deficit_secs = (accumulated_bytes as f64 - budget) / self.cap_bytes_per_sec as f64;
+            let sleep_time = std::time::Duration::from_secs_f64(deficit_secs.min(0.25));
+            tokio::time::sleep(sleep_time).await;
+        }
+    }
+}
+
 // ── Latency sampling ──────────────────────────────────────────────────────────
 
 pub(crate) struct LatencySamples {

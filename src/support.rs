@@ -900,9 +900,13 @@ pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::M
     }
     
     let mut semaphore = Arc::new(Semaphore::new(effective_conc));
-
+    
     // Global token-bucket rate limiter (shared across all workers).
     let mut rate_limiter = RateLimiter::new(rate_limit);
+    
+    // Global byte-rate pacer for --throughput-cap (shared across all workers).
+    // cap == 0 → instant-pass (unlimited), byte-identical behavior to before.
+    let byte_pacer = ByteRatePacer::new(throughput_cap_bytes);
 
     loop {
         if let Some(max_err) = max_errors {
@@ -984,6 +988,11 @@ pub(crate) async fn run_load(state: Arc<Mutex<AppState>>, pool: Arc<std::sync::M
             // Global token-bucket rate limiter: shared across all workers so
             // total request rate never exceeds `rate` req/s regardless of concurrency.
             rate_limiter.pace().await;
+            
+            // Global throughput cap (--throughput-cap): holds dispatch until the
+            // total bytes transmitted so far fit within cap × elapsed. No-op when
+            // the cap is unset (0 = unlimited).
+            byte_pacer.pace(stats.total_bytes.load(Ordering::Relaxed)).await;
             
             let next_client = match pool.lock() {
                 Ok(mut guard) => guard.next(),
