@@ -26,6 +26,39 @@ pub struct GuiApp {
     pending_attack: Option<&'static AmplificationMethod>,
 }
 
+/// Resolve the HTTP target for attacks launched from the TUI.
+///
+/// Honors the `SIMULATE_GUI_TARGET` environment variable when set (non-empty);
+/// otherwise falls back to a local default so TUI-launched HTTP attacks hit a
+/// harmless endpoint unless the user overrides it.
+fn tui_attack_target() -> String {
+    std::env::var("SIMULATE_GUI_TARGET")
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:8080/".to_string())
+}
+
+/// Build the subprocess argument vector for an HTTP attack launched from the TUI.
+///
+/// Returns the five CLI positionals expected by the binary:
+/// `[target, "console", mode, concurrency, duration]`. The `"console"` mode
+/// slot selects direct (no-proxy) operation — the CLI treats any mode other
+/// than `tor`/`scrape-tor` as direct scraping.
+fn build_tui_attack_args(
+    mode: &str,
+    concurrency: usize,
+    duration: u64,
+    target: &str,
+) -> Vec<String> {
+    vec![
+        target.to_string(),
+        "console".to_string(),
+        mode.to_string(),
+        concurrency.to_string(),
+        duration.to_string(),
+    ]
+}
+
 fn unique_layers() -> Vec<&'static str> {
     let mut seen = Vec::new();
     for m in METHODS.iter() {
@@ -183,15 +216,12 @@ impl GuiApp {
 
         let mut cmd = std::process::Command::new(&exe);
 
-        // HTTP methods (have http_mode)
+        // HTTP methods (have http_mode): five positionals —
+        // target, "console" (direct/no-proxy mode slot), attack mode, concurrency, duration.
         if let Some(mode) = method.http_mode {
-            cmd.args([
-                "--proxy",
-                "",
-                mode,
-                &concurrency.to_string(),
-                &duration.to_string(),
-            ]);
+            let target = tui_attack_target();
+            let args = build_tui_attack_args(mode, concurrency, duration, &target);
+            cmd.args(&args);
         } else {
             match method.transport {
                 TransportType::Tcp => {
@@ -412,5 +442,41 @@ impl GuiApp {
                 f.render_widget(tor_block, main_chunks[4]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_tui_attack_args_returns_five_positionals() {
+        let args = build_tui_attack_args("slowread", 10, 15, "http://127.0.0.1:8080/");
+        assert_eq!(
+            args,
+            vec![
+                "http://127.0.0.1:8080/".to_string(),
+                "console".to_string(),
+                "slowread".to_string(),
+                "10".to_string(),
+                "15".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_tui_attack_args_uses_custom_target() {
+        let args = build_tui_attack_args("bandwidth", 4, 2, "https://example.com/");
+        assert_eq!(args[0], "https://example.com/");
+        assert_eq!(args.len(), 5);
+    }
+
+    #[test]
+    fn tui_attack_target_defaults_to_localhost() {
+        // Guard against interference: test only asserts default when env is unset.
+        if std::env::var("SIMULATE_GUI_TARGET").is_ok() {
+            return;
+        }
+        assert_eq!(tui_attack_target(), "http://127.0.0.1:8080/");
     }
 }
