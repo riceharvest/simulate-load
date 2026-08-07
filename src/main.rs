@@ -172,6 +172,25 @@ fn print_list_modes() {
 
 
 
+/// Round a value to 4 decimal places (used for the JSON report's error_rate).
+fn round4(x: f64) -> f64 {
+    (x * 10000.0).round() / 10000.0
+}
+
+/// Build a per-status-code histogram line from raw (code, count) pairs:
+/// keep only non-zero counts, sort by count descending, format as "code:count"
+/// joined by two spaces. Returns an empty string when there is nothing to show.
+fn format_histogram_line(entries: &[(u16, u64)]) -> String {
+    let mut hist_entries: Vec<(u16, u64)> = entries.iter().copied().filter(|&(_, n)| n > 0).collect();
+    hist_entries.sort_by(|a, b| b.1.cmp(&a.1));
+    if hist_entries.is_empty() {
+        String::new()
+    } else {
+        let parts: Vec<String> = hist_entries.iter().map(|(c, n)| format!("{}:{}", c, n)).collect();
+        parts.join("  ")
+    }
+}
+
 #[tokio::main]
 #[allow(unused_variables, unused_assignments, unreachable_code)]
 async fn main() {
@@ -1621,14 +1640,12 @@ async fn main() {
             if !quiet {
                 println!("  {}", final_stats);
                 // Per-status-code histogram (lock-free array indexed by code-100).
-                let mut hist_entries: Vec<(u16, u64)> = (100..=999)
+                let hist_entries: Vec<(u16, u64)> = (100..=999)
                     .map(|c| (c, stats.status_hist[c as usize - 100].load(Ordering::Relaxed)))
-                    .filter(|&(_, n)| n > 0)
                     .collect();
-                hist_entries.sort_by(|a, b| b.1.cmp(&a.1));
-                if !hist_entries.is_empty() {
-                    let parts: Vec<String> = hist_entries.iter().map(|(c, n)| format!("{}:{}", c, n)).collect();
-                    println!("  Histogram: {}", parts.join("  "));
+                let hist_line = format_histogram_line(&hist_entries);
+                if !hist_line.is_empty() {
+                    println!("  Histogram: {}", hist_line);
                 }
                 // Print safety controls info
                 {
@@ -1712,7 +1729,7 @@ async fn main() {
                         "connect": stats.error_connect.load(Ordering::Relaxed),
                         "other": stats.error_other.load(Ordering::Relaxed)
                     },
-                    "error_rate": (error_rate * 10000.0).round() / 10000.0,
+                    "error_rate": round4(error_rate),
                     "safety_controls": {
                         "max_requests": state_guard.max_requests,
                         "concurrency_max": state_guard.concurrency_max,
@@ -1821,16 +1838,14 @@ async fn main() {
                     stats.status_5xx.load(Ordering::Relaxed),
                     {
                         // Build a per-status-code histogram line from the lock-free array.
-                        let mut entries: Vec<(u16, u64)> = (100..=999)
+                        let entries: Vec<(u16, u64)> = (100..=999)
                             .map(|c| (c, stats.status_hist[c as usize - 100].load(Ordering::Relaxed)))
-                            .filter(|&(_, n)| n > 0)
                             .collect();
-                        entries.sort_by(|a, b| b.1.cmp(&a.1));
-                        if entries.is_empty() {
+                        let line = format_histogram_line(&entries);
+                        if line.is_empty() {
                             String::new()
                         } else {
-                            let parts: Vec<String> = entries.iter().map(|(c, n)| format!("{}:{}", c, n)).collect();
-                            format!("                        Histogram: {}", parts.join("  "))
+                            format!("                        Histogram: {}", line)
                         }
                     },
                     stats.errors.load(Ordering::Relaxed),
@@ -2874,5 +2889,83 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(elapsed >= Duration::from_millis(180), "expected ~250ms deficit sleep, got {:?}", elapsed);
         assert!(elapsed < Duration::from_secs(2), "pace should converge near the deficit, got {:?}", elapsed);
+    }
+
+    // ── round4 (JSON report error_rate rounding) ────────────────────────────
+
+    #[test]
+    fn round4_rounds_to_four_decimal_places() {
+        // The JSON report rounds error_rate to 4 decimals via (x * 10000.0).round() / 10000.0.
+        assert_eq!(round4(0.12345), 0.1235);
+        assert_eq!(round4(0.12344), 0.1234);
+        assert_eq!(round4(0.00005), 0.0001);
+    }
+
+    #[test]
+    fn round4_realistic_error_rates() {
+        // Regression: error_rate in the JSON report must be a ratio rounded to 4
+        // decimals — never a percentage, never full f64 noise.
+        assert_eq!(round4(1.0 / 3.0), 0.3333);
+        assert_eq!(round4(2.0 / 3.0), 0.6667);
+        assert_eq!(round4(0.5), 0.5);
+        assert_eq!(round4(0.0), 0.0);
+        assert_eq!(round4(1.0), 1.0);
+    }
+
+    #[test]
+    fn round4_stays_within_half_unit_of_input() {
+        // Rounding to 4 decimals must never move the value by more than 0.00005 + epsilon.
+        for &x in &[0.0f64, 0.0001, 0.123456789, 0.5, 0.99996, 1.0] {
+            let r = round4(x);
+            assert!((r - x).abs() <= 0.00006, "round4({}) = {} moved too far", x, r);
+        }
+        // Values already at 4-decimal precision are fixed points.
+        assert_eq!(round4(0.25), 0.25);
+        assert_eq!(round4(0.9999), 0.9999);
+    }
+
+    // ── format_histogram_line (per-status-code histogram) ───────────────────
+
+    #[test]
+    fn histogram_line_empty_input() {
+        assert_eq!(format_histogram_line(&[]), "");
+    }
+
+    #[test]
+    fn histogram_line_all_zero_counts_is_empty() {
+        // A run with no completed requests must not print a Histogram line at all.
+        let entries: Vec<(u16, u64)> = (100..=999).map(|c| (c, 0)).collect();
+        assert_eq!(format_histogram_line(&entries), "");
+    }
+
+    #[test]
+    fn histogram_line_single_entry() {
+        assert_eq!(format_histogram_line(&[(200, 5)]), "200:5");
+    }
+
+    #[test]
+    fn histogram_line_filters_zero_and_sorts_by_count_desc() {
+        // Contract: zero-count codes dropped, entries sorted by count descending
+        // (stable — ties keep input/code order), "code:count" joined by two spaces.
+        let entries = [(200u16, 3u64), (404, 10), (500, 10), (301, 0)];
+        assert_eq!(format_histogram_line(&entries), "404:10  500:10  200:3");
+    }
+
+    #[test]
+    fn histogram_line_from_status_hist_array_indexing() {
+        // Regression for the code-100 index arithmetic: replicate the exact
+        // collection mapping used at the print sites over a real lock-free array,
+        // then verify the formatted line. An off-by-one in `c as usize - 100`
+        // would shift every bucket and corrupt the reported histogram.
+        use std::sync::atomic::AtomicU64;
+        let hist: std::sync::Arc<[AtomicU64; 900]> =
+            std::sync::Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
+        hist[200usize - 100].store(42, Ordering::Relaxed);
+        hist[404usize - 100].store(7, Ordering::Relaxed);
+        hist[500usize - 100].store(13, Ordering::Relaxed);
+        let entries: Vec<(u16, u64)> = (100..=999)
+            .map(|c| (c, hist[c as usize - 100].load(Ordering::Relaxed)))
+            .collect();
+        assert_eq!(format_histogram_line(&entries), "200:42  500:13  404:7");
     }
 }
