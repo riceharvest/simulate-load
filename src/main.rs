@@ -783,7 +783,7 @@ async fn main() {
             }
         };
 
-        raw::run_raw_load(raw_mode, &raw_target, raw_concurrency, raw_duration).await;
+        raw::run_raw_load(raw_mode, &raw_target, raw_concurrency, raw_duration, rate_limit).await;
         return;
     }
 

@@ -120,7 +120,7 @@ impl RawMode {
 // TCP SYN Flood
 // ---------------------------------------------------------------------------
 
-async fn tcp_syn_flood(target: &str, concurrency: usize, duration_secs: u64) {
+async fn tcp_syn_flood(target: &str, concurrency: usize, duration_secs: u64, rate_limit: Option<u64>) {
     let (dst_ip, dst_port) = parse_target(target);
     println!("  [TCP SYN Flood] target={}:{}, concurrency={}, duration={}s", 
         std::net::Ipv4Addr::from(dst_ip), dst_port, concurrency, duration_secs);
@@ -173,8 +173,10 @@ async fn tcp_syn_flood(target: &str, concurrency: usize, duration_secs: u64) {
     let mut rng = rand::rng();
     let mut packet = [0u8; 40];
     let addr_size = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let mut rate_limiter = crate::types::RateLimiter::new(rate_limit);
 
     while start.elapsed().as_secs() < duration_secs {
+        rate_limiter.pace().await;
         for _ in 0..concurrency {
             // --- IP header ---
             // Identification
@@ -238,7 +240,7 @@ async fn tcp_syn_flood(target: &str, concurrency: usize, duration_secs: u64) {
 // TCP RST Flood
 // ---------------------------------------------------------------------------
 
-async fn tcp_rst_flood(target: &str, concurrency: usize, duration_secs: u64) {
+async fn tcp_rst_flood(target: &str, concurrency: usize, duration_secs: u64, rate_limit: Option<u64>) {
     let (dst_ip, dst_port) = parse_target(target);
     println!("  [TCP RST Flood] target={}:{}, concurrency={}, duration={}s",
         std::net::Ipv4Addr::from(dst_ip), dst_port, concurrency, duration_secs);
@@ -288,8 +290,10 @@ async fn tcp_rst_flood(target: &str, concurrency: usize, duration_secs: u64) {
     let mut rng = rand::rng();
     let mut packet = [0u8; 40];
     let addr_size = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let mut rate_limiter = crate::types::RateLimiter::new(rate_limit);
 
     while start.elapsed().as_secs() < duration_secs {
+        rate_limiter.pace().await;
         for _ in 0..concurrency {
             let id: u16 = rng.random();
             ip_hdr[4..6].copy_from_slice(&id.to_be_bytes());
@@ -338,7 +342,7 @@ async fn tcp_rst_flood(target: &str, concurrency: usize, duration_secs: u64) {
 // ICMP Smurf
 // ---------------------------------------------------------------------------
 
-async fn icmp_smurf(target: &str, concurrency: usize, duration_secs: u64) {
+async fn icmp_smurf(target: &str, concurrency: usize, duration_secs: u64, rate_limit: Option<u64>) {
     let (dst_ip, _dst_port) = parse_target(target);
     println!("  [ICMP Smurf] target={}, concurrency={}, duration={}s",
         std::net::Ipv4Addr::from(dst_ip), concurrency, duration_secs);
@@ -364,8 +368,10 @@ async fn icmp_smurf(target: &str, concurrency: usize, duration_secs: u64) {
     let start = std::time::Instant::now();
     let mut rng = rand::rng();
     let addr_size = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let mut rate_limiter = crate::types::RateLimiter::new(rate_limit);
 
     while start.elapsed().as_secs() < duration_secs {
+        rate_limiter.pace().await;
         for _ in 0..concurrency {
             let id: u16 = rng.random();
             let seq: u16 = rng.random();
@@ -400,7 +406,7 @@ async fn icmp_smurf(target: &str, concurrency: usize, duration_secs: u64) {
 // ICMP Fragmentation (large echo requests requiring fragmentation)
 // ---------------------------------------------------------------------------
 
-async fn icmp_fragmentation(target: &str, concurrency: usize, duration_secs: u64) {
+async fn icmp_fragmentation(target: &str, concurrency: usize, duration_secs: u64, rate_limit: Option<u64>) {
     let (dst_ip, _dst_port) = parse_target(target);
     println!("  [ICMP Fragmentation] target={}, concurrency={}, duration={}s",
         std::net::Ipv4Addr::from(dst_ip), concurrency, duration_secs);
@@ -425,8 +431,10 @@ async fn icmp_fragmentation(target: &str, concurrency: usize, duration_secs: u64
     let mut rng = rand::rng();
     let addr_size = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
     let payload_len = icmp_pkt.len();
+    let mut rate_limiter = crate::types::RateLimiter::new(rate_limit);
 
     while start.elapsed().as_secs() < duration_secs {
+        rate_limiter.pace().await;
         for _ in 0..concurrency {
             let id: u16 = rng.random();
             let seq: u16 = rng.random();
@@ -460,7 +468,7 @@ async fn icmp_fragmentation(target: &str, concurrency: usize, duration_secs: u64
 // IP Fragmentation Overload (overlapping IP fragments)
 // ---------------------------------------------------------------------------
 
-async fn ip_frag_overload(target: &str, concurrency: usize, duration_secs: u64) {
+async fn ip_frag_overload(target: &str, concurrency: usize, duration_secs: u64, rate_limit: Option<u64>) {
     let (dst_ip, _dst_port) = parse_target(target);
     println!("  [IP Frag Overload] target={}, concurrency={}, duration={}s",
         std::net::Ipv4Addr::from(dst_ip), concurrency, duration_secs);
@@ -507,8 +515,10 @@ async fn ip_frag_overload(target: &str, concurrency: usize, duration_secs: u64) 
     let start = std::time::Instant::now();
     let mut rng = rand::rng();
     let addr_size = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let mut rate_limiter = crate::types::RateLimiter::new(rate_limit);
 
     while start.elapsed().as_secs() < duration_secs {
+        rate_limiter.pace().await;
         for _ in 0..concurrency {
             let id: u16 = rng.random();
             let src_ip = random_ip();
@@ -578,7 +588,7 @@ async fn ip_frag_overload(target: &str, concurrency: usize, duration_secs: u64) 
 // ARP Flood
 // ---------------------------------------------------------------------------
 
-async fn arp_flood(target: &str, concurrency: usize, duration_secs: u64) {
+async fn arp_flood(target: &str, concurrency: usize, duration_secs: u64, rate_limit: Option<u64>) {
     let (dst_ip, _dst_port) = parse_target(target);
     println!("  [ARP Flood] target={}, concurrency={}, duration={}s",
         std::net::Ipv4Addr::from(dst_ip), concurrency, duration_secs);
@@ -627,8 +637,10 @@ async fn arp_flood(target: &str, concurrency: usize, duration_secs: u64) {
 
     let start = std::time::Instant::now();
     let sll_size = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+    let mut rate_limiter = crate::types::RateLimiter::new(rate_limit);
 
     while start.elapsed().as_secs() < duration_secs {
+        rate_limiter.pace().await;
         for _ in 0..concurrency {
             let src_mac = random_mac();
             let sender_ip = random_ip();
@@ -665,7 +677,7 @@ async fn arp_flood(target: &str, concurrency: usize, duration_secs: u64) {
 // MAC Flooding
 // ---------------------------------------------------------------------------
 
-async fn mac_flooding(target: &str, concurrency: usize, duration_secs: u64) {
+async fn mac_flooding(target: &str, concurrency: usize, duration_secs: u64, rate_limit: Option<u64>) {
     let (_dst_ip, _dst_port) = parse_target(target);
     println!("  [MAC Flooding] concurrency={}, duration={}s", concurrency, duration_secs);
 
@@ -697,8 +709,10 @@ async fn mac_flooding(target: &str, concurrency: usize, duration_secs: u64) {
 
     let start = std::time::Instant::now();
     let sll_size = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+    let mut rate_limiter = crate::types::RateLimiter::new(rate_limit);
 
     while start.elapsed().as_secs() < duration_secs {
+        rate_limiter.pace().await;
         for _ in 0..concurrency {
             let dst_mac = random_mac();
             let src_mac = random_mac();
@@ -730,7 +744,7 @@ async fn mac_flooding(target: &str, concurrency: usize, duration_secs: u64) {
 // Public dispatch
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn run_raw_load(mode: RawMode, target: &str, concurrency: usize, duration_secs: u64) {
+pub(crate) async fn run_raw_load(mode: RawMode, target: &str, concurrency: usize, duration_secs: u64, rate_limit: Option<u64>) {
     // Check root (CAP_NET_RAW) — warn but don't abort
     let uid = unsafe { libc::geteuid() };
     if uid != 0 {
@@ -738,12 +752,12 @@ pub(crate) async fn run_raw_load(mode: RawMode, target: &str, concurrency: usize
     }
 
     match mode {
-        RawMode::TcpSynFlood => tcp_syn_flood(target, concurrency, duration_secs).await,
-        RawMode::TcpRstFlood => tcp_rst_flood(target, concurrency, duration_secs).await,
-        RawMode::IcmpSmurf => icmp_smurf(target, concurrency, duration_secs).await,
-        RawMode::IcmpFragmentation => icmp_fragmentation(target, concurrency, duration_secs).await,
-        RawMode::IpFragOverload => ip_frag_overload(target, concurrency, duration_secs).await,
-        RawMode::ArpFlood => arp_flood(target, concurrency, duration_secs).await,
-        RawMode::MacFlooding => mac_flooding(target, concurrency, duration_secs).await,
+        RawMode::TcpSynFlood => tcp_syn_flood(target, concurrency, duration_secs, rate_limit).await,
+        RawMode::TcpRstFlood => tcp_rst_flood(target, concurrency, duration_secs, rate_limit).await,
+        RawMode::IcmpSmurf => icmp_smurf(target, concurrency, duration_secs, rate_limit).await,
+        RawMode::IcmpFragmentation => icmp_fragmentation(target, concurrency, duration_secs, rate_limit).await,
+        RawMode::IpFragOverload => ip_frag_overload(target, concurrency, duration_secs, rate_limit).await,
+        RawMode::ArpFlood => arp_flood(target, concurrency, duration_secs, rate_limit).await,
+        RawMode::MacFlooding => mac_flooding(target, concurrency, duration_secs, rate_limit).await,
     }
 }
